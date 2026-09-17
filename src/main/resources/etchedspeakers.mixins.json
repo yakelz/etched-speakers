@@ -1,0 +1,16 @@
+{
+  "required": true,
+  "minVersion": "0.8",
+  "package": "net.yakel.etchedspeakers.client.mixin",
+  "compatibilityLevel": "JAVA_21",
+  "client": [
+    "EtchedStreamMixin",
+    "ChannelMixin",
+    "SoundManagerAccessor",
+    "SoundEngineAccessor",
+    "SoundEngineLifecycleMixin",
+    "ModListScreenAccessor",
+    "ModInfoPanelMixin"
+  ],
+  "injectors": { "defaultRequire": 1 }
+}
