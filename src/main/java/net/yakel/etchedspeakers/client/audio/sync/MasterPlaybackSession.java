@@ -14,6 +14,7 @@ import java.util.Optional;
 import javax.sound.sampled.AudioFormat;
 import net.minecraft.client.resources.sounds.SoundInstance;
 import net.minecraft.core.GlobalPos;
+import net.minecraft.client.sounds.AudioStream;
 import org.lwjgl.openal.AL10;
 import org.lwjgl.openal.AL11;
 
@@ -31,9 +32,19 @@ public final class MasterPlaybackSession {
     private long baseFrame;
     private int originalSource;
     private volatile boolean closed;
+    private final AudioDiagnostics.Trace diagnostic;
+    private final StreamingQueueDiagnostics queueDiagnostic;
+    private int diagnosticAlState = -1;
+    private final GlobalPos sourceKey;
+    private volatile Observation observation;
+    private boolean remote;
+    private boolean decoderEof;
+    private final net.yakel.etchedspeakers.source.model.StreamingRecovery recovery = new net.yakel.etchedspeakers.source.model.StreamingRecovery();
+    public record Observation(GlobalPos source, long id, String media, long frame, int rate, boolean paused) {}
 
-    MasterPlaybackSession(SoundInstance owner, AudioFormat format) {
+    MasterPlaybackSession(SoundInstance owner, SoundInstance token, GlobalPos source, AudioStream decoder, AudioFormat format) {
         this.owner = owner;
+        this.sourceKey = source;
         this.format = format;
         sampleRate = Math.round(format.getSampleRate());
         chunkFrames = Math.max(1, sampleRate / 10);
@@ -41,14 +52,34 @@ public final class MasterPlaybackSession {
         String location = owner.getSound() instanceof OnlineSound online ? online.getURL() : owner.getLocation().toString();
         mediaKey = new TrackReference(TrackData.isLocalSound(location) ? TrackReference.Kind.SOUND_EVENT : TrackReference.Kind.URL,
                 location, Optional.empty(), -1, -1).mediaKey();
+        sourceIdentity = SpeakerRequest.describe(source);
+        diagnostic = new AudioDiagnostics.Trace(source, owner, token, decoder, pcm, mediaKey);
+        queueDiagnostic = new StreamingQueueDiagnostics(diagnostic,
+                format.getChannels() * format.getSampleSizeInBits() / 8, sampleRate);
     }
+
+    public AudioDiagnostics.Trace diagnostic() { return diagnostic; }
+    public StreamingQueueDiagnostics queueDiagnostic() { return queueDiagnostic; }
+    public long diagnosticBaseFrame() { return baseFrame; }
+    public Observation observation() { return remote || closed ? null : observation; }
+    public Observation playhead() { return closed ? null : observation; }
+    public boolean isRemote() { return remote; }
+    public GlobalPos sourceKey() { return sourceKey; }
+    public String mediaKey() { return mediaKey; }
+    public void prepareRemote(long frame) { remote = true; pcm.startAt(frame); baseFrame = frame; }
+    public void decoderEof() { decoderEof = true; }
+    public boolean hasDecoderEof() { return decoderEof; }
+    public long decodedEndFrame() { return pcm.endFrame(); }
+    public net.yakel.etchedspeakers.source.model.StreamingRecovery recovery() { return recovery; }
 
     public int chunkFrames() { return chunkFrames; }
     public boolean isClosed() { return closed; }
 
     public void bind(int source) {
         originalSource = source;
+        queueDiagnostic.bind(source);
         MasterSessions.register(owner, this);
+        diagnostic.log("CHANNEL_STREAM_ATTACHED", "alSource=" + source + " frame=" + baseFrame);
         EtchedSpeakers.LOGGER.debug("[EtchedSpeakers] Master audio detected track={} sampleRate={} bits={} channels={} decoder=1 windowMs=500",
                 mediaKey, sampleRate, format.getSampleSizeInBits(), format.getChannels());
     }
@@ -92,9 +123,25 @@ public final class MasterPlaybackSession {
     }
 
     public void update() {
+        if (!closed && originalSource != 0) {
+            int observedState = AL10.alGetSourcei(originalSource, AL10.AL_SOURCE_STATE);
+            if(observedState == AL10.AL_PLAYING || observedState == AL10.AL_PAUSED) {
+                observation = new Observation(sourceKey, diagnostic.id, mediaKey,
+                        baseFrame + AL10.alGetSourcei(originalSource, AL11.AL_SAMPLE_OFFSET),sampleRate,observedState == AL10.AL_PAUSED);
+            }
+        }
         if (closed || originalSource == 0 || speakers.size() == 0) return;
         int state = AL10.alGetSourcei(originalSource, AL10.AL_SOURCE_STATE);
-        if (state == AL10.AL_STOPPED) { detach("MASTER_STOPPED"); return; }
+        if (state != diagnosticAlState) {
+            diagnosticAlState = state;
+            diagnostic.log("ORIGINAL_AL_STATE", "alState=" + state + " baseFrame=" + baseFrame);
+        }
+        if (state == AL10.AL_STOPPED) {
+            // Desired-output updates can run before Channel's refill. Preserve bindings until it services
+            // an eligible drained stream; terminal stop/destruction still closes them normally.
+            if (!decoderEof && recovery.awaitingService()) return;
+            detach("MASTER_STOPPED"); return;
+        }
         if (state != AL10.AL_PLAYING && state != AL10.AL_PAUSED) return;
         long masterFrame = baseFrame + AL10.alGetSourcei(originalSource, AL11.AL_SAMPLE_OFFSET);
         if (masterFrame < pcm.startFrame() || masterFrame >= pcm.endFrame()) return;
@@ -107,10 +154,12 @@ public final class MasterPlaybackSession {
                     binding.output = new SpeakerOutput(pcm, sampleRate, chunkFrames, key, binding.request.track().stableKey());
                     binding.output.setGain(binding.request.gain());
                     binding.output.setRange(binding.request.audibleRange());
+                    diagnostic.speaker("SPEAKER_ATTACH", binding.request, "DESIRED_OUTPUT", masterFrame);
                     EtchedSpeakers.LOGGER.debug("[EtchedSpeakers] Speaker JOIN speaker={} source={} track={} masterSequence={} masterFrame={} decoder=1",
                             SpeakerRequest.describe(key), sourceIdentity, binding.request.track().stableKey(), pcm.sequence(), masterFrame);
                 } catch (IllegalStateException failure) {
                     binding.failed = true; // Avoid allocation attempts/log spam every update.
+                    diagnostic.speaker("SPEAKER_ATTACH_FAILED", binding.request, "OPENAL_ALLOCATION_FAILED", masterFrame);
                     EtchedSpeakers.LOGGER.warn("[EtchedSpeakers] Speaker DETACH speaker={} reason=OPENAL_ALLOCATION_FAILED track={}",
                             SpeakerRequest.describe(key), mediaKey);
                     return;
@@ -119,6 +168,7 @@ public final class MasterPlaybackSession {
             // Each output reads the original cursor freshly; no output is a clock for another.
             binding.output.update(baseFrame, originalSource, state == AL10.AL_PAUSED, pitch);
             if (binding.output.isClosed()) {
+                diagnostic.speaker("SPEAKER_DETACH", binding.request, "OPENAL_QUEUE_FAILED", masterFrame);
                 binding.output = null;
                 binding.failed = true;
             }
@@ -137,6 +187,7 @@ public final class MasterPlaybackSession {
     }
 
     private void closeBinding(GlobalPos key, Binding binding, String reason) {
+        diagnostic.speaker("SPEAKER_DETACH", binding.request, reason, baseFrame);
         if (binding.output != null) {
             binding.output.close();
             binding.output = null;
@@ -154,14 +205,18 @@ public final class MasterPlaybackSession {
     private void reportCountChange(int before) {
         int after = outputCount();
         if (before == after) return;
+        diagnostic.outputs(after);
         EtchedSpeakers.LOGGER.debug("[EtchedSpeakers] Master outputs changed source={} active={} track={}", sourceIdentity, after, mediaKey);
         MasterSessions.logCounts();
     }
 
-    public void close() {
+    public void close(String reason) {
         if (closed) return;
+        recovery.stop();
+        if (!remote && decoderEof) net.yakel.etchedspeakers.client.audio.remote.PlaybackObserver.eof(observation);
         closed = true;
-        detach("MASTER_CLOSED");
+        diagnostic.masterClosed(reason, baseFrame);
+        detach("MASTER_DESTROYED:" + reason);
         MasterSessions.remove(owner, this);
         originalBuffers.clear();
         pcm.clear();

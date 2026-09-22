@@ -27,6 +27,11 @@ public final class MasterSessions {
     public static MasterPlaybackSession find(SoundInstance original) {
         return SESSIONS.get(unwrap(original));
     }
+    public static java.util.List<MasterPlaybackSession> all() { return java.util.List.copyOf(SESSIONS.values()); }
+    public static MasterPlaybackSession local(GlobalPos source) {
+        return SESSIONS.values().stream().filter(s -> !s.isRemote() && !s.isClosed() && s.sourceKey().equals(source))
+                .max(java.util.Comparator.comparingLong(s -> s.diagnostic().id)).orElse(null);
+    }
 
     static void register(SoundInstance owner, MasterPlaybackSession session) {
         SESSIONS.put(owner, session);
@@ -61,7 +66,7 @@ public final class MasterSessions {
     }
 
     /** Called synchronously on the sound executor before SoundEngine flush/context destruction. */
-    public static void clearOutputs() {
-        for (var session : SESSIONS.values()) session.detach("SOUND_ENGINE_RESET");
+    public static void clearOutputs(String reason) {
+        for (var session : SESSIONS.values()) session.detach(reason);
     }
 }

@@ -8,6 +8,7 @@ import java.io.IOException;
 import java.util.concurrent.CompletableFuture;
 import net.minecraft.client.Minecraft;
 import net.minecraft.client.sounds.AudioStream;
+import net.minecraft.core.GlobalPos;
 
 /** Wraps the original getStream future exactly once; never calls getStream/openStream itself. */
 public final class PcmTapInstaller {
@@ -23,16 +24,27 @@ public final class PcmTapInstaller {
         if (entry.isEmpty()) return original; // Entity/radio/other sounds are not this prototype's master.
         var pos = entry.get().getKey().immutable();
         var token = entry.get().getValue();
+        var source = GlobalPos.of(level.dimension(), pos);
+        AudioDiagnostics.observe(source);
+        AudioDiagnostics.event("STREAM_REQUEST", "source=" + SpeakerRequest.describe(source)
+                + " soundInstanceIdentity=" + AudioDiagnostics.identity(owner));
         return original.thenCompose(stream -> {
             var result = new CompletableFuture<AudioStream>();
             client.execute(() -> {
+                AudioDiagnostics.event("STREAM_RETURN", "source=" + SpeakerRequest.describe(source)
+                        + " soundInstanceIdentity=" + AudioDiagnostics.identity(owner) + " streamIdentity=" + AudioDiagnostics.identity(stream));
                 if (client.level != level || records.get(pos) != token || !client.getSoundManager().isActive(token)) {
-                    try { stream.close(); } catch (IOException ignored) {}
+                    String reason = client.level != level ? "WORLD_CHANGE" : records.get(pos) != token ? "SOURCE_SOUND_REPLACED" : "ORIGINAL_SOUND_INACTIVE";
+                    AudioDiagnostics.event("STREAM_DISCARDED", "source=" + SpeakerRequest.describe(source) + " reason=" + reason
+                            + " streamIdentity=" + AudioDiagnostics.identity(stream));
+                    try { stream.close(); } catch (IOException ignored) {
+                        AudioDiagnostics.event("DECODER_CLOSE", "result=FAILED reason=" + reason + " exceptionClass=" + ignored.getClass().getName());
+                    }
                     result.complete(EmptyAudioStream.INSTANCE);
                 } else if (stream == EmptyAudioStream.INSTANCE || !PcmTap.supports(stream.getFormat())) {
                     result.complete(stream);
                 } else {
-                    result.complete(new PcmTap(owner, stream));
+                    result.complete(new PcmTap(owner, token, source, stream));
                 }
             });
             return result;

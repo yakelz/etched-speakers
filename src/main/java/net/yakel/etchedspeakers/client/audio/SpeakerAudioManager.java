@@ -2,8 +2,10 @@ package net.yakel.etchedspeakers.client.audio;
 
 import net.yakel.etchedspeakers.blockentity.SpeakerBlockEntity;
 import net.yakel.etchedspeakers.client.audio.sync.AudioThreadBridge;
+import net.yakel.etchedspeakers.client.audio.sync.AudioDiagnostics;
 import net.yakel.etchedspeakers.client.audio.sync.MasterSessions;
 import net.yakel.etchedspeakers.client.audio.sync.SpeakerRequest;
+import net.yakel.etchedspeakers.client.audio.remote.RemotePlayback;
 import net.yakel.etchedspeakers.client.source.ClientSourcePlaybackState;
 import net.yakel.etchedspeakers.source.model.SpeakerSelection;
 import java.util.ArrayList;
@@ -34,6 +36,8 @@ public final class SpeakerAudioManager {
             level = client.level;
         }
         if (level == null || client.player == null || client.isPaused()) return;
+        RemotePlayback.tick(client);
+        AudioDiagnostics.tick();
         var sources = new HashMap<GlobalPos, ClientSourcePlaybackState>();
         var reasons = new HashMap<GlobalPos, String>();
         if (untilSearch-- <= 0) {
@@ -45,11 +49,18 @@ public final class SpeakerAudioManager {
             var request = readRequest(client, key, sources, reasons);
             if (request != null) desired.put(key, request);
         }
+        RemotePlayback.endTick(client);
         if (desired.equals(previous)) return;
         for (var key : previous.keySet()) {
             if (!desired.containsKey(key) && !reasons.containsKey(key)) {
                 readRequest(client, key, sources, reasons);
                 reasons.putIfAbsent(key, "SAFETY_LIMIT");
+            }
+            var old = previous.get(key);
+            var next = desired.get(key);
+            if (next == null || old.master() != next.master()) {
+                old.master().diagnostic().speaker("SPEAKER_DESIRED_REMOVED", old,
+                        reasons.getOrDefault(key, next == null ? "SAFETY_LIMIT" : "SOURCE_TRACK_CHANGED"), -1);
             }
         }
         var snapshot = Map.copyOf(desired);
@@ -74,9 +85,7 @@ public final class SpeakerAudioManager {
                     var key = GlobalPos.of(level.dimension(), speaker.getBlockPos().immutable());
                     double distance = distanceSquared(client, key);
                     if (distance >= radius * radius) continue;
-                    if (readRequest(client, key, sources, ignoredReasons) != null) {
-                        candidates.add(new SpeakerSelection.Candidate<>(key, distance, speaker.getAudibleRange()));
-                    }
+                    candidates.add(new SpeakerSelection.Candidate<>(key, distance, speaker.getAudibleRange()));
                 }
             }
         }
@@ -100,11 +109,19 @@ public final class SpeakerAudioManager {
             return unavailable(key, reasons, "OUT_OF_ACTIVATION_RANGE");
         }
         var source = GlobalPos.of(speaker.getSourceDimension().orElseThrow(), speaker.getSourcePos().orElseThrow());
+        RemotePlayback.interested(source, pos);
+        AudioDiagnostics.observe(source);
         var state = sources.computeIfAbsent(source, ignored -> EtchedAudioBridge.read(client, speaker));
-        if (state.currentTrack().isEmpty()) return unavailable(key, reasons, state.reason());
-        var master = MasterSessions.find(state.sourceSound().orElseThrow());
+        var local = state.sourceSound().map(MasterSessions::find).orElseGet(()->MasterSessions.local(source));
+        var master = RemotePlayback.choose(source, local, state.currentTrack().isPresent());
+        var track = master!=null && !master.isRemote() && state.currentTrack().isPresent()
+                ? state.currentTrack().get() : RemotePlayback.track(source);
+        if(track==null) {
+            if (state.currentTrack().isEmpty()) return unavailable(key, reasons, state.reason());
+            track=state.currentTrack().get();
+        }
         if (master == null || master.isClosed()) return unavailable(key, reasons, "MASTER_PCM_UNAVAILABLE");
-        return new SpeakerRequest(key, source, master, state.currentTrack().orElseThrow(),
+        return new SpeakerRequest(key, source, master, track,
                 client.options.getSoundSourceVolume(SoundSource.RECORDS) * speaker.getVolume(), speaker.getAudibleRange());
     }
 
@@ -119,6 +136,8 @@ public final class SpeakerAudioManager {
     }
 
     public void reset(Minecraft client, String reason) {
+        RemotePlayback.reset(reason);
+        AudioDiagnostics.reset(reason);
         AudioThreadBridge.execute(() -> MasterSessions.applyDesired(Map.of(), Map.of(), reason));
         previous = Map.of();
         selected = List.of();

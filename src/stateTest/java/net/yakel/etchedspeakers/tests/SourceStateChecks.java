@@ -18,6 +18,8 @@ public final class SourceStateChecks {
     private static int checks;
 
     public static void main(String[] args) {
+        StreamingRecoveryChecks.run();
+        RemoteSessionChecks.run();
         var a = url("https://example.invalid/a?token=secret", 0, 0);
         var b = url("https://example.invalid/b", 0, 1);
         check(a.equals(url(a.location(), 0, 0)), "Identity survives reconstruction");

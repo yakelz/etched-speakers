@@ -24,6 +24,7 @@ public final class EtchedSpeakers {
         ModBlockEntities.BLOCK_ENTITIES.register(modEventBus);
         ModMenus.MENUS.register(modEventBus);
         modEventBus.addListener(SpeakerSettingsPayload::register);
+        modEventBus.addListener(net.yakel.etchedspeakers.network.RemotePayloads::register);
         modEventBus.addListener(ModItems::addCreativeItems);
         LOGGER.info("Etched Speakers initialized");
     }

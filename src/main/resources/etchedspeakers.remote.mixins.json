@@ -1,0 +1,8 @@
+{
+  "required": true,
+  "minVersion": "0.8",
+  "package": "net.yakel.etchedspeakers.mixin",
+  "compatibilityLevel": "JAVA_21",
+  "mixins": ["AlbumSelectionMixin"],
+  "injectors": { "defaultRequire": 1 }
+}

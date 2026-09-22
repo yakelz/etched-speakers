@@ -9,6 +9,7 @@ public final class PcmWindow {
     private final int sampleBytes;
     private final int capacityFrames;
     private long endFrame;
+    private long origin;
     private long sequence;
 
     public PcmWindow(int capacityFrames, int sampleBytes) {
@@ -46,7 +47,7 @@ public final class PcmWindow {
         return frames;
     }
 
-    public long startFrame() { return Math.max(0, endFrame - capacityFrames); }
+    public long startFrame() { return Math.max(origin, endFrame - capacityFrames); }
     public long endFrame() { return endFrame; }
     public long sequence() { return sequence; }
     public int capacityFrames() { return capacityFrames; }
@@ -56,5 +57,12 @@ public final class PcmWindow {
         Arrays.fill(bytes, (byte) 0);
         endFrame = 0;
         sequence = 0;
+        origin = 0;
+    }
+
+    /** Empty window at a prepared remote decoder cursor. Capacity and read-ahead remain unchanged. */
+    public void startAt(long frame) {
+        if(frame < 0 || sequence != 0 || endFrame != 0) throw new IllegalStateException("Nonempty PCM origin");
+        origin = endFrame = frame;
     }
 }

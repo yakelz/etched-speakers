@@ -13,6 +13,9 @@ Adds synchronized, linkable speakers for Etched. Connect multiple speakers to va
 '''
 
 [[mixins]]
+config="etchedspeakers.remote.mixins.json"
+
+[[mixins]]
 config="etchedspeakers.mixins.json"
 
 [[dependencies.${mod_id}]]

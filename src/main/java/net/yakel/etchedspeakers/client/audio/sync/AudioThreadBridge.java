@@ -18,6 +18,8 @@ public final class AudioThreadBridge {
         executor().execute(operation);
     }
 
+    public static boolean isSameThread() { return executor().isSameThread(); }
+
     public static void sync(Runnable operation) {
         var executor = executor();
         if (executor.isSameThread()) operation.run();

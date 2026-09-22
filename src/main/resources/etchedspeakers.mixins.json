@@ -5,6 +5,7 @@
   "compatibilityLevel": "JAVA_21",
   "client": [
     "EtchedStreamMixin",
+    "EtchedStopListeningMixin",
     "ChannelMixin",
     "SoundManagerAccessor",
     "SoundEngineAccessor",
