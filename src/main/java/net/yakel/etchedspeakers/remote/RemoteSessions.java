@@ -26,13 +26,14 @@ public final class RemoteSessions {
     private static final Map<UUID, Watch> WATCHERS=new HashMap<>();
     private static final Map<UUID, Budget> BUDGETS=new HashMap<>();
     private static long sequence;
-    private static final SourceRetention RETENTION=new SourceRetention();
-    private static final int MAX_SOURCES=512;
+    private static final SourceRetention RETENTION=new SourceRetention(s->{var e=SOURCES.get(s); return e==null?0:e.timeline.generation();});
+    private static final int MAX_SOURCES=ListenerRetention.MAX_RETAINED_SOURCES;
     private static final class Entry {
         RemoteTimeline timeline=new RemoteTimeline();
         final RemoteObserverLease remote=new RemoteObserverLease();
+        final RemoteObserverLease local=new RemoteObserverLease();
         boolean remoteOwned, finished;
-        final Set<UUID> localViewers=new HashSet<>(); // Delivery only, never retention listeners.
+        final Set<UUID> localViewers=new HashSet<>(); // Snapshot delivery history; holder lifetime lives in SourceRetention.
         List<TrackReference> inventory=List.of();
         TrackReference track;
         String reason="OBSERVED";
@@ -48,7 +49,9 @@ public final class RemoteSessions {
         return report ? ++b.reports<=80 : ++b.interests<=4;
     }
     public static void report(ServerPlayer p, Report report) {
-        if(!budget(p,true) || !p.isAlive() || !report.source().dimension().equals(p.level().dimension())
+        if(!budget(p,true)) return;
+        if(report.generation()!=0) { alignedReport(p,report); return; }
+        if(!p.isAlive() || !report.source().dimension().equals(p.level().dimension())
                 || p.distanceToSqr(net.minecraft.world.phys.Vec3.atCenterOf(report.source().pos()))>64*64
                 || !RemoteTimeline.valid(report.frame(),report.rate()) || report.localId()<=0) return;
         var state=AudioSourceResolver.readState(p.serverLevel(),report.source().pos());
@@ -62,12 +65,13 @@ public final class RemoteSessions {
         var e=SOURCES.get(report.source());
         if(e==null) {
             if(report.eof() || SOURCES.size()>=MAX_SOURCES) return;
+            if(!RETENTION.admitLocal(p.serverLevel(),report.source(),holders(p.getServer(),report.source(),null),now)) return;
             e=new Entry(); SOURCES.put(report.source(),e);
         }
         if(!CanonicalAlignment.acceptsLocalObservation(e.remoteOwned)) return; // Returning local frame=0 / old track cannot roll back canonical remote authority.
         if(report.eof()) {
             if(e.timeline.active() && e.timeline.observer().equals(p.getUUID().toString())
-                    && e.timeline.localId()==report.localId() && RETENTION.ready(report.source())) {
+                    && e.timeline.localId()==report.localId() && RETENTION.ready(report.source()) && RETENTION.listeners(report.source())>0) {
                 next(p.getServer(),report.source(),e,now); return;
             }
             if(e.timeline.eof(p.getUUID().toString(),report.localId(),now)) {
@@ -107,7 +111,7 @@ public final class RemoteSessions {
         if(e.track==null || !e.remoteOwned) return;
         var level=server.getLevel(source.dimension());
         var viewers=new HashSet<UUID>();
-        boolean active=RETENTION.held(source) && e.timeline.active();
+        boolean active=RETENTION.alive(source) && e.timeline.active();
         if(active && level!=null) for(var p:level.getChunkSource().chunkMap.getPlayers(new net.minecraft.world.level.ChunkPos(source.pos()),false)) {
             var w=WATCHERS.get(p.getUUID());
             if(w==null || !p.isAlive() || !w.dimension().equals(source.dimension())) continue;
@@ -125,7 +129,7 @@ public final class RemoteSessions {
         long now=p.serverLevel().getGameTime();
         PacketDistributor.sendToPlayer(p,new Snapshot(w.epoch(),source,e.timeline.generation(),e.track.mediaKey(),
                 active?e.track.location():"",e.track.slot(),e.track.trackIndex(),e.timeline.at(now),e.timeline.rate(),now,
-                active,e.timeline.paused(),reason,0,e.remoteOwned,true));
+                active,e.timeline.paused(),reason,active?e.local.tokenFor(p.getUUID()):0,e.remoteOwned,true));
     }
     private static Set<GlobalPos> validateSpeakers(ServerPlayer p, List<net.minecraft.core.BlockPos> positions, Set<GlobalPos> previous) {
         var result=new HashSet<GlobalPos>();
@@ -143,7 +147,7 @@ public final class RemoteSessions {
     private static void send(ServerPlayer p, Watch w, GlobalPos source, Entry e, String override) {
         if(e==null || e.track==null) return;
         long now=p.serverLevel().getGameTime();
-        if(override==null && !RETENTION.held(source)) override="RETENTION_DENIED";
+        if(override==null && !RETENTION.alive(source)) override="RETENTION_DENIED";
         boolean active=override==null && e.timeline.active();
         if(override!=null && !override.equals("RETENTION_DENIED")) log("REMOTE_UNSUBSCRIBE",source,e,override);
         PacketDistributor.sendToPlayer(p,new Snapshot(w.epoch(),source,e.timeline.generation(),e.track.mediaKey(),
@@ -171,7 +175,7 @@ public final class RemoteSessions {
                 || !RETENTION.ready(r.source()) || e==null || !e.timeline.matches(r.generation(),r.media())) return;
         var state=AudioSourceResolver.readState(p.serverLevel(),r.source().pos());
         if(!RemoteTimeline.sourceAllowed(state,r.media()) || !state.availableTracks().contains(e.track)) return;
-        if(!e.timeline.acceptsRemoteCursor(r.frame(),r.rate(),now,r.eof())) return;
+        if(!(r.eof()?e.timeline.acceptsHandoffEnd(r.frame(),r.rate(),now):e.timeline.acceptsRemoteCursor(r.frame(),r.rate(),now,false))) return;
         // READY is not authoritative: only record the candidate. Server assignment precedes any clock mutation.
         if(r.token()==0) {
             e.remote.ready(p.getUUID(),r.epoch(),r.master(),now);
@@ -180,7 +184,7 @@ public final class RemoteSessions {
             return;
         }
         if(!e.remote.accepts(p.getUUID(),r.epoch(),r.master(),r.token(),now)) return;
-        if(!e.timeline.remoteProgress(r.frame(),r.rate(),now,r.eof())) return;
+        if(!(r.eof()?e.timeline.handoffEnd(r.frame(),r.rate(),now):e.timeline.remoteProgress(r.frame(),r.rate(),now))) return;
         e.remote.ready(p.getUUID(),r.epoch(),r.master(),now); e.remote.renew(now);
         if(r.eof()) {
             log("SESSION_EOF",r.source(),e,"ASSIGNED_REMOTE_DECODER");
@@ -192,23 +196,64 @@ public final class RemoteSessions {
         return ids;
     }
     private static void elect(MinecraftServer server, GlobalPos source, Entry e, long now) {
-        if(e.remote.elect(listeners(source),now)) {
+        boolean remoteChanged=e.remote.elect(listeners(source),now);
+        boolean localChanged=e.local.elect(e.remote.owner()==null?holders(server,source,null).stream().filter(id->RETENTION.holder(source,id)).collect(java.util.stream.Collectors.toSet()):Set.of(),now);
+        if(remoteChanged || localChanged) {
             if(e.remote.owner()!=null) e.remoteOwned=true;
             EtchedSpeakers.LOGGER.info("[ES-RETENTION] OBSERVER_ASSIGN source={} generation={} observer={} listeners={} frame={}",
                     source,e.timeline.generation(),e.remote.owner(),RETENTION.listeners(source),e.timeline.at(now));
+            EtchedSpeakers.LOGGER.info("[ES-RETENTION] AUTHORITY_HANDOFF source={} generation={} remoteObserver={} localObserver={} frame={}",
+                    source,e.timeline.generation(),e.remote.owner(),e.local.owner(),e.timeline.at(now));
             broadcast(server,source,e);
         }
     }
-    private static void reconcile(MinecraftServer server) {
+    private static Set<UUID> holders(MinecraftServer server,GlobalPos source,UUID excluded) {
+        var level=server.getLevel(source.dimension()); if(level==null) return Set.of();
+        var result=new HashSet<UUID>();
+        for(var p:level.getChunkSource().chunkMap.getPlayers(new net.minecraft.world.level.ChunkPos(source.pos()),false)) {
+            if(p.isAlive() && p.level().dimension().equals(source.dimension()) && !p.getUUID().equals(excluded)
+                    && server.getPlayerList().getPlayer(p.getUUID())==p) result.add(p.getUUID());
+        }
+        return Set.copyOf(result);
+    }
+    private static void reconcile(MinecraftServer server) { reconcile(server,null); }
+    private static void reconcile(MinecraftServer server,UUID excluded) {
         var validated=new HashMap<GlobalPos,Set<UUID>>();
         WATCHERS.forEach((id,w)->{for(var s:w.sources()) validated.computeIfAbsent(s,k->new HashSet<>()).add(id);});
-        RETENTION.reconcile(server,validated,server.overworld().getGameTime());
+        var local=new HashMap<GlobalPos,Set<UUID>>();
+        // Admission is bounded; no discovery of arbitrary blocks/chunks.
+        for(var source:RETENTION.keys()) {
+            var viewers=holders(server,source,excluded); if(!viewers.isEmpty()) local.put(source,viewers);
+        }
+        RETENTION.reconcile(server,validated,local,server.overworld().getGameTime());
+    }
+    /** Only a current-generation aligned original with an explicit lease may anchor an owned session. */
+    private static void alignedReport(ServerPlayer p,Report r) {
+        var e=SOURCES.get(r.source()); var w=WATCHERS.get(p.getUUID()); long now=p.serverLevel().getGameTime();
+        if(!p.isAlive() || !p.level().dimension().equals(r.source().dimension()) || r.localId()<=0 || r.paused()
+                || e==null || !e.remoteOwned || w==null || !w.epoch().equals(r.epoch())
+                || RemoteTimeline.expired(now,w.renewed(),RemoteTimeline.INTEREST_LEASE)
+                || !RETENTION.alive(r.source()) || !RETENTION.ready(r.source())
+                || !holders(p.getServer(),r.source(),null).contains(p.getUUID())
+                || !e.timeline.matches(r.generation(),r.media()) || e.track==null
+                || e.track.slot()!=r.slot() || e.track.trackIndex()!=r.index()) return;
+        var state=AudioSourceResolver.readState(p.serverLevel(),r.source().pos());
+        if(!RemoteTimeline.sourceAllowed(state,r.media()) || !state.availableTracks().contains(e.track)
+                || !(r.eof()?e.timeline.acceptsHandoffEnd(r.frame(),r.rate(),now):e.timeline.acceptsRemoteCursor(r.frame(),r.rate(),now,false))) return;
+        if(r.observerToken()==0) {
+            e.local.ready(p.getUUID(),r.epoch(),r.localId(),now); elect(p.getServer(),r.source(),e,now);
+            sendLocal(p,w,r.source(),e,true,e.reason); return;
+        }
+        if(e.remote.owner()!=null || !e.local.accepts(p.getUUID(),r.epoch(),r.localId(),r.observerToken(),now)) return;
+        if(!(r.eof()?e.timeline.handoffEnd(r.frame(),r.rate(),now):e.timeline.remoteProgress(r.frame(),r.rate(),now))) return;
+        e.local.ready(p.getUUID(),r.epoch(),r.localId(),now); e.local.renew(now);
+        if(r.eof()) { log("SESSION_EOF",r.source(),e,"ASSIGNED_ALIGNED_LOCAL_DECODER"); next(p.getServer(),r.source(),e,now); }
     }
     private static void bootstrap(MinecraftServer server, GlobalPos source, Entry e, SourcePlaybackState state, TrackReference track, long now, String reason) {
         if(track==null || !RemoteTimeline.sourceAllowed(state,track.mediaKey()) || track.location().length()>8192) {
             e.finished=true; stop(server,source,e,now,"NO_NEXT_TRACK"); return;
         }
-        e.remote.clear(); e.finished=false; e.inventory=state.availableTracks();
+        e.remote.clear(); e.local.clear(); e.finished=false; e.inventory=state.availableTracks();
         e.track=track; e.timeline.bootstrap(track.mediaKey(),++sequence,now); e.changed=now; e.reason=reason;
         log(reason,source,e,"NEW_TRACK_FRAME_ZERO_RATE_PENDING"); broadcast(server,source,e);
     }
@@ -219,7 +264,7 @@ public final class RemoteSessions {
         bootstrap(server,source,e,state,RetainedTrackSelection.select(level,source.pos(),state,e.track),now,"SESSION_NEXT");
     }
     private static void stop(MinecraftServer server, GlobalPos source, Entry e, long now, String reason) {
-        e.remote.clear();
+        e.remote.clear(); e.local.clear();
         if(e.timeline.stop(now)) { stopped(source,e,now,reason); broadcast(server,source,e); }
     }
     public static void explicitSelection(net.minecraft.server.level.ServerLevel level, net.minecraft.core.BlockPos pos) {
@@ -262,13 +307,13 @@ public final class RemoteSessions {
             var state=level==null?null:AudioSourceResolver.readState(level,source.pos());
             if(e.timeline.active()) {
                 String reason=state==null || !state.available()?
-                        (RETENTION.held(source) && !RETENTION.ready(source)?null:"SERVER_SOURCE_UNAVAILABLE")
+                        (RETENTION.alive(source) && !RETENTION.ready(source)?null:"SERVER_SOURCE_UNAVAILABLE")
                         : !RemoteTimeline.sourceAllowed(state,e.timeline.media()) || !state.availableTracks().contains(e.track)?"SOURCE_STOPPED_OR_TRACK_REMOVED"
-                        : !RETENTION.held(source) && RemoteTimeline.expired(now,e.timeline.lastReport(),RemoteTimeline.SESSION_LEASE)?"OBSERVER_TIMEOUT":null;
+                        : !RETENTION.alive(source) && RemoteTimeline.expired(now,e.timeline.lastReport(),RemoteTimeline.SESSION_LEASE)?"OBSERVER_TIMEOUT":null;
                 if(reason!=null) { stop(server,source,e,now,reason); e.finished=false; }
                 else {
                     e.timeline.advance(now);
-                    if(RETENTION.held(source)) elect(server,source,e,now);
+                    if(RETENTION.alive(source)) elect(server,source,e,now);
                 }
             }
             if(RETENTION.ready(source) && state!=null && state.available()) {
@@ -277,7 +322,7 @@ public final class RemoteSessions {
                 if(!e.timeline.active() && !e.finished && RETENTION.listeners(source)>0 && state.playing()!=SourcePlaybackState.Playback.STOPPED)
                     bootstrap(server,source,e,state,RetainedTrackSelection.select(level,source.pos(),state,null),now,"SESSION_BOOTSTRAP_NEW");
             }
-            if(!e.timeline.active() && !RETENTION.held(source) && now-e.changed>200) it.remove();
+            if(!e.timeline.active() && !RETENTION.alive(source) && now-e.changed>200) it.remove();
         }
         if(server.getTickCount()%20==0) WATCHERS.forEach((id,w)->{
             var p=server.getPlayerList().getPlayer(id); if(p!=null) for(var s:w.sources()) send(p,w,s,SOURCES.get(s),null);
@@ -290,7 +335,7 @@ public final class RemoteSessions {
         WATCHERS.remove(player.getUUID()); BUDGETS.remove(player.getUUID());
         SOURCES.values().forEach(e->e.localViewers.remove(player.getUUID()));
         if(player instanceof ServerPlayer p) {
-            reconcile(p.getServer());
+            reconcile(p.getServer(),p.getUUID());
             SOURCES.forEach((s,e)->elect(p.getServer(),s,e,p.serverLevel().getGameTime()));
         }
     }

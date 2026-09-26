@@ -21,6 +21,8 @@ import net.yakel.etchedspeakers.EtchedSpeakers;
 import net.yakel.etchedspeakers.client.audio.sync.*;
 import gg.moonflower.etched.api.record.PlayableRecord;
 import net.yakel.etchedspeakers.network.RemotePayloads.Snapshot;
+import net.yakel.etchedspeakers.network.RemotePayloads.Report;
+import net.neoforged.neoforge.network.PacketDistributor;
 import net.yakel.etchedspeakers.source.model.*;
 import net.yakel.etchedspeakers.source.model.CanonicalAlignment.*;
 
@@ -33,15 +35,30 @@ public final class LocalSourceSync {
     private static final Map<Long,Aligned> ALIGNED=new HashMap<>();
     private static boolean controlled;
     private static long lastSample;
+    private static long terminalSequence=1L<<60; // Separate namespace from real master ids; client-thread only.
     private static final class Entry {
         Snapshot snapshot;
         volatile Clock clock;
         long heard;
         boolean exhausted;
+        PreparedEnd preparedEnd;
         Identity attempted;
         long attemptedAt;
         final DriftGate drift=new DriftGate();
         Identity identity() { var s=snapshot; return new Identity(s.source(),s.generation(),s.media(),s.slot(),s.index()); }
+    }
+    private static final class PreparedEnd {
+        final long id=++terminalSequence,frame;
+        final int rate;
+        long lastSent=Long.MIN_VALUE/2;
+        boolean announced;
+        PreparedEnd(long frame,int rate) { this.frame=frame; this.rate=rate; }
+    }
+    /** Decoder EOF evidence only, no additional reads or playable replacement stream. */
+    private static final class PreparationEnd extends java.io.EOFException {
+        final long frame;
+        final int rate;
+        PreparationEnd(long frame,int rate) { super("TARGET_BEYOND_EOF"); this.frame=frame; this.rate=rate; }
     }
     /** Weak-map value must not reference its key. Preparation validity does not depend on a shared decoder. */
     public static final class Binding {
@@ -65,7 +82,19 @@ public final class LocalSourceSync {
             this.source=source; this.world=world; this.media=media; this.slot=slot; this.index=index; this.creation=creation;
         }
     }
-    private record Aligned(MasterPlaybackSession master,long offset) {}
+    private static final class Aligned {
+        final MasterPlaybackSession master;
+        final long offset;
+        final Identity identity;
+        final SoundInstance token;
+        MasterPlaybackSession.Observation terminal;
+        long announcedMaster,lastSent=Long.MIN_VALUE/2,closedAt;
+        Aligned(MasterPlaybackSession master,long offset,Identity identity,SoundInstance token) {
+            this.master=master; this.offset=offset; this.identity=identity; this.token=token;
+        }
+        MasterPlaybackSession master() { return master; }
+        long offset() { return offset; }
+    }
     private LocalSourceSync() {}
 
     public static boolean owned(GlobalPos source) {
@@ -73,6 +102,19 @@ public final class LocalSourceSync {
     }
     public static long reportedFrame(MasterPlaybackSession.Observation o) {
         var aligned=ALIGNED.get(o.id()); return o.frame()+(aligned==null?0:aligned.offset());
+    }
+    /** Called only for originals that actually completed this generation's pre-roll. Never a raw recreation. */
+    public static boolean report(MasterPlaybackSession.Observation o,boolean eof) {
+        var a=ALIGNED.get(o.id()); var e=SOURCES.get(o.source());
+        if(a==null || !owned(o.source()) || !a.identity.equals(e.identity()) || !o.media().equals(a.identity.media())
+                || original(o.source())!=a.token || !valid(e,album(o.source()))) return false;
+        if(eof) a.terminal=o;
+        long now=System.nanoTime(); if(now-a.lastSent<1_000_000_000L) return true;
+        long token=a.announcedMaster==o.id()?e.snapshot.observerToken():0;
+        PacketDistributor.sendToServer(new Report(o.source(),o.media(),a.identity.slot(),a.identity.index(),o.id(),
+                o.frame()+a.offset,o.rate(),o.paused(),eof,a.identity.generation(),e.snapshot.epoch(),token));
+        a.lastSent=now; a.announcedMaster=o.id();
+        return true;
     }
     public static void snapshot(Snapshot s) {
         var e=SOURCES.get(s.source());
@@ -88,7 +130,7 @@ public final class LocalSourceSync {
         e.snapshot=s; e.heard=System.nanoTime();
         e.clock=new Clock(s.frame(),s.rate(),s.paused(),e.heard,
                 Math.clamp(Minecraft.getInstance().level.getGameTime()-s.serverTick(),0L,40L));
-        if(changed) { e.exhausted=false; log("CANONICAL_SOURCE_VISIBLE",e,"SNAPSHOT",0); }
+        if(changed) { e.exhausted=false; e.preparedEnd=null; log("CANONICAL_SOURCE_VISIBLE",e,"SNAPSHOT",0); }
         if(!s.active() || !s.remoteOwned()) {
             if(wasActive) log("LOCAL_CANONICAL_RELEASE",e,s.reason(),0);
             // Grace/tracking expiry relinquishes ownership without restarting a healthy local sound.
@@ -168,7 +210,8 @@ public final class LocalSourceSync {
         StreamPreparation.submit(()->{
             boolean transfer=false;
             try {
-                OriginalStreamPreparation.advance(reader,()->e.clock.target(),()->e.clock.rate(),()->guard.current(id));
+                try { OriginalStreamPreparation.advance(reader,()->e.clock.target(),()->e.clock.rate(),()->guard.current(id)); }
+                catch(java.io.EOFException end) { throw new PreparationEnd(reader.frames,Math.round(reader.getFormat().getSampleRate())); }
                 synchronized(b) {
                     if(!guard.current(id)) throw new IOException("CANCELLED");
                     b.waiting=reader; transfer=true;
@@ -182,7 +225,9 @@ public final class LocalSourceSync {
                 close(reader);
                 synchronized(b) { b.waiting=null; }
                 b.failed=true; silence(token);
-                if(current && failure!=null) { e.exhausted=true; log("LOCAL_PREROLL_CANCEL",e,
+                if(current && failure!=null) {
+                    if(failure.getCause() instanceof PreparationEnd end) e.preparedEnd=new PreparedEnd(end.frame,end.rate);
+                    e.exhausted=true; log("LOCAL_PREROLL_CANCEL",e,
                         failure.getCause() instanceof java.io.EOFException?"TARGET_BEYOND_EOF":"PREPARATION_FAILED",0); }
                 else log("LOCAL_PREROLL_CANCEL",e,"STALE_PREPARATION",0);
                 result.complete(EmptyAudioStream.INSTANCE); return;
@@ -200,7 +245,7 @@ public final class LocalSourceSync {
     /** Invoked immediately before the future is completed and Channel may begin reading. */
     public static void attached(Binding b, PcmTap tap) {
         if(b!=null && b.ready) {
-            ALIGNED.put(tap.session().diagnostic().id,new Aligned(tap.session(),b.offset));
+            ALIGNED.put(tap.session().diagnostic().id,new Aligned(tap.session(),b.offset,b.creation,original(b.source)));
             var e=SOURCES.get(b.source); if(e!=null) log("LOCAL_SOUND_ALIGNED",e,"LOCAL_PCM_REMAINS_RELATIVE",0);
         }
     }
@@ -250,7 +295,15 @@ public final class LocalSourceSync {
     public static void tick(Minecraft client) {
         long now=System.nanoTime(); boolean sample=now-lastSample>=1_000_000_000L;
         if(sample) lastSample=now;
-        ALIGNED.entrySet().removeIf(item->item.getValue().master().isClosed());
+        var alignedIterator=ALIGNED.entrySet().iterator();
+        while(alignedIterator.hasNext()) {
+            var a=alignedIterator.next().getValue();
+            if(a.master.isClosed() && a.closedAt==0) a.closedAt=now;
+            // EOF can arrive before assignment. Retain and retry terminal READY/progress for this generation.
+            if(a.terminal!=null) {
+                if(!report(a.terminal,true) || a.closedAt!=0 && now-a.closedAt>120_000_000_000L) alignedIterator.remove();
+            } else if(a.closedAt!=0 && now-a.closedAt>5_000_000_000L) alignedIterator.remove();
+        }
         var iterator=SOURCES.entrySet().iterator();
         while(iterator.hasNext()) {
             var item=iterator.next(); var e=item.getValue(); var source=item.getKey();
@@ -258,7 +311,16 @@ public final class LocalSourceSync {
             if(!owned(source)) continue;
             var a=album(source);
             if(!valid(e,a)) { cancel(source); continue; }
-            if(e.exhausted) continue;
+            if(e.exhausted) {
+                var end=e.preparedEnd;
+                if(end!=null && now-end.lastSent>=1_000_000_000L) {
+                    var s=e.snapshot;
+                    PacketDistributor.sendToServer(new Report(source,s.media(),s.slot(),s.index(),end.id,end.frame,end.rate,
+                            false,true,s.generation(),s.epoch(),end.announced?s.observerToken():0));
+                    end.announced=true; end.lastSent=now;
+                }
+                continue;
+            }
             var sound=original(source); var b=sound==null?null:BINDINGS.get(sound);
             if(sound==null || b==null || !e.identity().equals(b.creation)) {
                 recreate(e,a,"LATE_SNAPSHOT_OR_NEW_GENERATION"); continue;

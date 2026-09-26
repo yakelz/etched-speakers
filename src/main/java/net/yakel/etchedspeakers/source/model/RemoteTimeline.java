@@ -86,6 +86,18 @@ public final class RemoteTimeline {
         frame=reportedFrame; tick=lastReport=now; paused=false;
         return true;
     }
+    /** Handoff may have no decoder for 60s plus up to 30s preparation. Only actual assigned EOF gets this window. */
+    public boolean acceptsHandoffEnd(long endFrame,int sampleRate,long now) {
+        if(!active || !valid(endFrame,sampleRate)) return false;
+        if(rate==0) return acceptsRemoteCursor(endFrame,sampleRate,now,true);
+        long delta=endFrame-at(now);
+        return rate==sampleRate && delta<=rate*3L && delta>=-rate*90L;
+    }
+    public boolean handoffEnd(long endFrame,int sampleRate,long now) {
+        if(!acceptsHandoffEnd(endFrame,sampleRate,now)) return false;
+        frame=endFrame; rate=sampleRate; tick=lastReport=now; paused=false;
+        return true;
+    }
     /** Re-anchor without renewing any observer lease, including during observer handoff/grace. */
     public void advance(long now) { if (active && rate>0) { frame=at(now); tick=now; } }
     public boolean matches(long reportedGeneration, String reportedMedia) {

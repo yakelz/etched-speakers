@@ -21,14 +21,17 @@ public final class RemotePayloads {
         return new CustomPacketPayload.Type<>(ResourceLocation.fromNamespaceAndPath(EtchedSpeakers.MOD_ID, name));
     }
     public record Report(GlobalPos source, String media, int slot, int index, long localId,
-                         long frame, int rate, boolean paused, boolean eof) implements CustomPacketPayload {
+                         long frame, int rate, boolean paused, boolean eof, long generation, UUID epoch, long observerToken) implements CustomPacketPayload {
+        public Report(GlobalPos source,String media,int slot,int index,long localId,long frame,int rate,boolean paused,boolean eof) {
+            this(source,media,slot,index,localId,frame,rate,paused,eof,0,new UUID(0,0),0);
+        }
         public static final Type<Report> TYPE = RemotePayloads.type("playback_report");
         public static final StreamCodec<FriendlyByteBuf, Report> CODEC = new StreamCodec<>() {
             public Report decode(FriendlyByteBuf b) { return new Report(GlobalPos.STREAM_CODEC.decode(b), b.readUtf(160),
-                    b.readVarInt(), b.readVarInt(), b.readVarLong(), b.readVarLong(), b.readVarInt(), b.readBoolean(), b.readBoolean()); }
+                    b.readVarInt(), b.readVarInt(), b.readVarLong(), b.readVarLong(), b.readVarInt(), b.readBoolean(), b.readBoolean(), b.readVarLong(), b.readUUID(), b.readVarLong()); }
             public void encode(FriendlyByteBuf b, Report p) { GlobalPos.STREAM_CODEC.encode(b,p.source); b.writeUtf(p.media,160);
                 b.writeVarInt(p.slot); b.writeVarInt(p.index); b.writeVarLong(p.localId); b.writeVarLong(p.frame);
-                b.writeVarInt(p.rate); b.writeBoolean(p.paused); b.writeBoolean(p.eof); }
+                b.writeVarInt(p.rate); b.writeBoolean(p.paused); b.writeBoolean(p.eof); b.writeVarLong(p.generation); b.writeUUID(p.epoch); b.writeVarLong(p.observerToken); }
         };
         public Type<Report> type() { return TYPE; }
     }
@@ -79,7 +82,7 @@ public final class RemotePayloads {
         @Override public String toString() { return "RemoteSnapshot[source="+source+",generation="+generation+",media="+media+"]"; }
     }
     public static void register(RegisterPayloadHandlersEvent event) {
-        var r=event.registrar("remote-3-local-canonical");
+        var r=event.registrar("remote-4-session-handoff");
         r.playToServer(RemoteReport.TYPE, RemoteReport.CODEC, (p,c)->c.enqueueWork(()->{
             if(c.player() instanceof ServerPlayer player) RemoteSessions.remoteReport(player,p);
         }));
