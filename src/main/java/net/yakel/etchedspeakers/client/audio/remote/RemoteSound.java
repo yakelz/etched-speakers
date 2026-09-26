@@ -9,7 +9,7 @@ import gg.moonflower.etched.client.sound.SoundCache;
 import java.io.*;
 import java.nio.ByteBuffer;
 import java.util.concurrent.*;
-import java.util.function.LongSupplier;
+import java.util.function.IntToLongFunction;
 import javax.sound.sampled.AudioFormat;
 import net.minecraft.client.Minecraft;
 import net.minecraft.client.resources.sounds.*;
@@ -55,7 +55,7 @@ final class RemoteSound extends AbstractSoundInstance {
             return CompletableFuture.completedFuture(tap);
         }
     }
-    CompletableFuture<Void> prepare(SoundBufferLibrary loader, LongSupplier target, int expectedRate) {
+    CompletableFuture<Void> prepare(SoundBufferLibrary loader, IntToLongFunction target, int expectedRate) {
         CompletableFuture<AudioStream> opened;
         if(gg.moonflower.etched.api.record.TrackData.isLocalSound(mediaLocation)) {
             var event=Minecraft.getInstance().getSoundManager().getSoundEvent(ResourceLocation.parse(mediaLocation));
@@ -71,17 +71,7 @@ final class RemoteSound extends AbstractSoundInstance {
             try {
                 if(!PcmTap.supports(reader.getFormat()) || expectedRate!=0 && Math.round(reader.getFormat().getSampleRate())!=expectedRate)
                     throw new IOException("Unsupported remote format/rate");
-                long start=System.nanoTime(); long frame=0;
-                int chunk=Math.max(1,Math.round(reader.getFormat().getSampleRate())/10);
-                while(true) {
-                    if(cancelled || System.nanoTime()-start>30_000_000_000L) throw new IOException("Preparation cancelled/timed out");
-                    long wanted=target.getAsLong();
-                    if(wanted<0) throw new IOException("Invalid remote target");
-                    if(frame>=wanted) break;
-                    var data=reader.read((int)Math.min(chunk,wanted-frame)*reader.frameBytes);
-                    if(data==null || !data.hasRemaining()) break; // Retain genuine EOF evidence for server-assigned handoff.
-                    frame+=data.remaining()/reader.frameBytes;
-                }
+                long frame=preRoll(reader,target,()->cancelled);
                 synchronized(this) {
                     if(cancelled) throw new IOException("Cancelled preparation");
                     prepared=new Prepared(reader,frame); frameReader=reader; transferred=true;
@@ -91,6 +81,20 @@ final class RemoteSound extends AbstractSoundInstance {
         },()->close(stream)));
     }
     long eofFrame() { var reader=frameReader; return reader!=null && reader.eof ? reader.frames : -1; }
+    /** Runs exclusively on StreamPreparation workers. Same bounded path for native and Etched media. */
+    static long preRoll(FrameReader reader,IntToLongFunction target,java.util.function.BooleanSupplier cancelled) throws IOException {
+        long start=System.nanoTime(),frame=0;
+        int rate=Math.round(reader.getFormat().getSampleRate()),chunk=Math.max(1,rate/10);
+        while(true) {
+            if(cancelled.getAsBoolean() || System.nanoTime()-start>30_000_000_000L) throw new IOException("Preparation cancelled/timed out");
+            long wanted=target.applyAsLong(rate);
+            if(wanted<0) throw new IOException("Invalid remote target");
+            if(frame>=wanted) return frame;
+            var data=reader.read((int)Math.min(chunk,wanted-frame)*reader.frameBytes);
+            if(data==null || !data.hasRemaining()) return frame; // Real EOF; do not wrap or fabricate samples.
+            frame+=data.remaining()/reader.frameBytes;
+        }
+    }
     synchronized PcmTap activate() {
         if(cancelled || prepared==null) return null;
         tap=new PcmTap(this,this,sourcePos,prepared.stream);

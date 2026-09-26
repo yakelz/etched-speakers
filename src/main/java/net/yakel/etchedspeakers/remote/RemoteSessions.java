@@ -22,6 +22,21 @@ import net.yakel.etchedspeakers.source.model.*;
 /** Ephemeral, server-thread confined. Reads stay nonblocking; retention alone owns runtime tickets. */
 @EventBusSubscriber(modid=EtchedSpeakers.MOD_ID)
 public final class RemoteSessions {
+    /** Called after a real inventory transition, on the server thread. Read-only evidence. */
+    public static void diagnoseVanillaRecord(net.minecraft.server.level.ServerLevel level,
+            net.minecraft.world.level.block.entity.JukeboxBlockEntity jukebox, boolean wasEmpty) {
+        var source=GlobalPos.of(level.dimension(),jukebox.getBlockPos());
+        var state=AudioSourceResolver.readState(level,jukebox.getBlockPos());
+        var e=SOURCES.get(source);
+        var item=jukebox.getTheItem();
+        EtchedSpeakers.LOGGER.info("[ES-VANILLA-ACT] RECORD_CHANGE source={} generation={} listenerCount={} media={} reason=wasEmpty:{},empty:{},state:{},tracks:{},music:{},albumCover:{},active:{}",
+                source,e==null?0:e.timeline.generation(),RETENTION.listeners(source),
+                state.availableTracks().stream().limit(3).map(TrackReference::mediaKey).toList(),
+                wasEmpty,item.isEmpty(),state.reason(),state.availableTracks().size(),
+                item.has(gg.moonflower.etched.core.registry.EtchedComponents.MUSIC),
+                item.has(gg.moonflower.etched.core.registry.EtchedComponents.ALBUM_COVER),e!=null && e.timeline.active());
+    }
+
     private static final Map<GlobalPos, Entry> SOURCES=new HashMap<>();
     private static final Map<UUID, Watch> WATCHERS=new HashMap<>();
     private static final Map<UUID, Budget> BUDGETS=new HashMap<>();
@@ -29,6 +44,7 @@ public final class RemoteSessions {
     private static final SourceRetention RETENTION=new SourceRetention(s->{var e=SOURCES.get(s); return e==null?0:e.timeline.generation();});
     private static final int MAX_SOURCES=ListenerRetention.MAX_RETAINED_SOURCES;
     private static final class Entry {
+        long nativeElapsedTicks=-1; // Native server cursor; never populated from client reports.
         RemoteTimeline timeline=new RemoteTimeline();
         final RemoteObserverLease remote=new RemoteObserverLease();
         final RemoteObserverLease local=new RemoteObserverLease();
@@ -55,6 +71,7 @@ public final class RemoteSessions {
                 || p.distanceToSqr(net.minecraft.world.phys.Vec3.atCenterOf(report.source().pos()))>64*64
                 || !RemoteTimeline.valid(report.frame(),report.rate()) || report.localId()<=0) return;
         var state=AudioSourceResolver.readState(p.serverLevel(),report.source().pos());
+        if(state.reason()==SourcePlaybackState.Reason.VANILLA_SONG_PLAYER) return;
         if(!RemoteTimeline.sourceAllowed(state,report.media())) return;
         // Exact occurrence when the client knows it; otherwise validate the media against the inventory.
         var track=state.availableTracks().stream().filter(t->t.mediaKey().equals(report.media()))
@@ -108,6 +125,7 @@ public final class RemoteSessions {
     }
     /** Public chunk tracking API. No source request, new listener or ticket is created. */
     private static void pushLocal(MinecraftServer server, GlobalPos source, Entry e, boolean heartbeat) {
+        if(e.nativeElapsedTicks>=0) return; // Native original remains owned by Minecraft, not Album reconciliation.
         if(e.track==null || !e.remoteOwned) return;
         var level=server.getLevel(source.dimension());
         var viewers=new HashSet<UUID>();
@@ -129,7 +147,7 @@ public final class RemoteSessions {
         long now=p.serverLevel().getGameTime();
         PacketDistributor.sendToPlayer(p,new Snapshot(w.epoch(),source,e.timeline.generation(),e.track.mediaKey(),
                 active?e.track.location():"",e.track.slot(),e.track.trackIndex(),e.timeline.at(now),e.timeline.rate(),now,
-                active,e.timeline.paused(),reason,active?e.local.tokenFor(p.getUUID()):0,e.remoteOwned,true));
+                active,e.timeline.paused(),reason,active?e.local.tokenFor(p.getUUID()):0,e.remoteOwned,true,-1));
     }
     private static Set<GlobalPos> validateSpeakers(ServerPlayer p, List<net.minecraft.core.BlockPos> positions, Set<GlobalPos> previous) {
         var result=new HashSet<GlobalPos>();
@@ -152,7 +170,8 @@ public final class RemoteSessions {
         if(override!=null && !override.equals("RETENTION_DENIED")) log("REMOTE_UNSUBSCRIBE",source,e,override);
         PacketDistributor.sendToPlayer(p,new Snapshot(w.epoch(),source,e.timeline.generation(),e.track.mediaKey(),
                 active?e.track.location():"",e.track.slot(),e.track.trackIndex(),e.timeline.at(now),e.timeline.rate(),now,
-                active,e.timeline.paused(),override!=null?override:e.reason,active?e.remote.tokenFor(p.getUUID()):0,e.remoteOwned,false));
+                active,e.nativeElapsedTicks>=0?nativePaused(p.serverLevel(),source):e.timeline.paused(),override!=null?override:e.reason,active?e.remote.tokenFor(p.getUUID()):0,e.remoteOwned,false,
+                nativeCursor(p.serverLevel(),source,e)));
     }
     private static void broadcast(MinecraftServer server, GlobalPos source, Entry e) {
         WATCHERS.forEach((id,w)->{
@@ -168,12 +187,14 @@ public final class RemoteSessions {
         if(!p.isAlive() || !budget(p,true) || !p.level().dimension().equals(r.source().dimension())
                 || r.master()<=0 || !RemoteTimeline.valid(r.frame(),r.rate())) return;
         var w=WATCHERS.get(p.getUUID()); var e=SOURCES.get(r.source());
+        if(e!=null && e.nativeElapsedTicks>=0) return;
         long now=p.serverLevel().getGameTime();
         if(w==null || !w.epoch().equals(r.epoch()) || !w.sources().contains(r.source())
                 || RemoteTimeline.expired(now,w.renewed(),RemoteTimeline.INTEREST_LEASE)
                 || !validateSpeakers(p,w.speakers(),w.sources()).contains(r.source())
                 || !RETENTION.ready(r.source()) || e==null || !e.timeline.matches(r.generation(),r.media())) return;
         var state=AudioSourceResolver.readState(p.serverLevel(),r.source().pos());
+        if(state.reason()==SourcePlaybackState.Reason.VANILLA_SONG_PLAYER) return;
         if(!RemoteTimeline.sourceAllowed(state,r.media()) || !state.availableTracks().contains(e.track)) return;
         if(!(r.eof()?e.timeline.acceptsHandoffEnd(r.frame(),r.rate(),now):e.timeline.acceptsRemoteCursor(r.frame(),r.rate(),now,false))) return;
         // READY is not authoritative: only record the candidate. Server assignment precedes any clock mutation.
@@ -196,6 +217,7 @@ public final class RemoteSessions {
         return ids;
     }
     private static void elect(MinecraftServer server, GlobalPos source, Entry e, long now) {
+        if(e.nativeElapsedTicks>=0) return; // The native source already has server authority.
         boolean remoteChanged=e.remote.elect(listeners(source),now);
         boolean localChanged=e.local.elect(e.remote.owner()==null?holders(server,source,null).stream().filter(id->RETENTION.holder(source,id)).collect(java.util.stream.Collectors.toSet()):Set.of(),now);
         if(remoteChanged || localChanged) {
@@ -230,6 +252,7 @@ public final class RemoteSessions {
     /** Only a current-generation aligned original with an explicit lease may anchor an owned session. */
     private static void alignedReport(ServerPlayer p,Report r) {
         var e=SOURCES.get(r.source()); var w=WATCHERS.get(p.getUUID()); long now=p.serverLevel().getGameTime();
+        if(e!=null && e.nativeElapsedTicks>=0) return;
         if(!p.isAlive() || !p.level().dimension().equals(r.source().dimension()) || r.localId()<=0 || r.paused()
                 || e==null || !e.remoteOwned || w==null || !w.epoch().equals(r.epoch())
                 || RemoteTimeline.expired(now,w.renewed(),RemoteTimeline.INTEREST_LEASE)
@@ -238,6 +261,7 @@ public final class RemoteSessions {
                 || !e.timeline.matches(r.generation(),r.media()) || e.track==null
                 || e.track.slot()!=r.slot() || e.track.trackIndex()!=r.index()) return;
         var state=AudioSourceResolver.readState(p.serverLevel(),r.source().pos());
+        if(state.reason()==SourcePlaybackState.Reason.VANILLA_SONG_PLAYER) return;
         if(!RemoteTimeline.sourceAllowed(state,r.media()) || !state.availableTracks().contains(e.track)
                 || !(r.eof()?e.timeline.acceptsHandoffEnd(r.frame(),r.rate(),now):e.timeline.acceptsRemoteCursor(r.frame(),r.rate(),now,false))) return;
         if(r.observerToken()==0) {
@@ -250,6 +274,7 @@ public final class RemoteSessions {
         if(r.eof()) { log("SESSION_EOF",r.source(),e,"ASSIGNED_ALIGNED_LOCAL_DECODER"); next(p.getServer(),r.source(),e,now); }
     }
     private static void bootstrap(MinecraftServer server, GlobalPos source, Entry e, SourcePlaybackState state, TrackReference track, long now, String reason) {
+        e.nativeElapsedTicks=-1;
         if(track==null || !RemoteTimeline.sourceAllowed(state,track.mediaKey()) || track.location().length()>8192) {
             e.finished=true; stop(server,source,e,now,"NO_NEXT_TRACK"); return;
         }
@@ -305,6 +330,14 @@ public final class RemoteSessions {
             var item=it.next(); var source=item.getKey(); var e=item.getValue(); var level=server.getLevel(source.dimension());
             long now=level==null?clock:level.getGameTime();
             var state=level==null?null:AudioSourceResolver.readState(level,source.pos());
+            if(level!=null && state!=null && RETENTION.ready(source)
+                    && state.reason()==SourcePlaybackState.Reason.VANILLA_SONG_PLAYER) {
+                updateNative(level,source,e,state,now);
+                continue;
+            }
+            if(e.nativeElapsedTicks>=0) {
+                stop(server,source,e,now,"NATIVE_SOURCE_STOPPED"); e.nativeElapsedTicks=-1; e.finished=false;
+            }
             if(e.timeline.active()) {
                 String reason=state==null || !state.available()?
                         (RETENTION.alive(source) && !RETENTION.ready(source)?null:"SERVER_SOURCE_UNAVAILABLE")
@@ -330,6 +363,44 @@ public final class RemoteSessions {
         for(var source:RETENTION.keys()) {
             var e=SOURCES.get(source); if(e!=null) pushLocal(server,source,e,server.getTickCount()%20==0);
         }
+    }
+    private static long nativeCursor(net.minecraft.server.level.ServerLevel level,GlobalPos source,Entry e) {
+        if(e.nativeElapsedTicks<0) return -1;
+        var chunk=level.getChunkSource().getChunkNow(source.pos().getX()>>4,source.pos().getZ()>>4);
+        return chunk!=null && chunk.getBlockEntity(source.pos()) instanceof net.minecraft.world.level.block.entity.JukeboxBlockEntity jukebox
+                && jukebox.getSongPlayer().isPlaying() ? jukebox.getSongPlayer().getTicksSinceSongStarted() : e.nativeElapsedTicks;
+    }
+    private static boolean nativePaused(net.minecraft.server.level.ServerLevel level,GlobalPos source) {
+        var chunk=level.getChunkSource().getChunkNow(source.pos().getX()>>4,source.pos().getZ()>>4);
+        // Mirror LevelChunk.isTicking, which gates the real JukeboxBlockEntity ticker.
+        return chunk==null || !level.getWorldBorder().isWithinBounds(source.pos())
+                || !chunk.getFullStatus().isOrAfter(net.minecraft.server.level.FullChunkStatus.BLOCK_TICKING)
+                || !level.areEntitiesLoaded(net.minecraft.world.level.ChunkPos.asLong(source.pos()));
+    }
+    private static void updateNative(net.minecraft.server.level.ServerLevel level,GlobalPos source,Entry e,SourcePlaybackState state,long now) {
+        if(state.currentTrack().isEmpty()) { stop(level.getServer(),source,e,now,"NATIVE_SONG_ENDED"); return; }
+        var chunk=level.getChunkSource().getChunkNow(source.pos().getX()>>4,source.pos().getZ()>>4);
+        if(chunk==null || !(chunk.getBlockEntity(source.pos()) instanceof net.minecraft.world.level.block.entity.JukeboxBlockEntity jukebox)) return;
+        long elapsed=jukebox.getSongPlayer().getTicksSinceSongStarted();
+        if(!NativeDiscClock.validTicks(elapsed)) { stop(level.getServer(),source,e,now,"NATIVE_CURSOR_INVALID"); return; }
+        var track=state.currentTrack().orElseThrow();
+        boolean changed=e.nativeElapsedTicks<0 || !track.equals(e.track) || elapsed<e.nativeElapsedTicks;
+        if(changed && e.timeline.active()) stop(level.getServer(),source,e,now,"NATIVE_START_CHANGED");
+        e.nativeElapsedTicks=elapsed;
+        if(!e.timeline.active() && RETENTION.listeners(source)>0) {
+            e.remote.clear(); e.local.clear(); e.remoteOwned=false; e.finished=false;
+            e.inventory=state.availableTracks(); e.track=track;
+            e.timeline.bootstrap(track.mediaKey(),++sequence,now); e.reason="NATIVE_SERVER_TIMELINE"; e.changed=now;
+            EtchedSpeakers.LOGGER.info("[ES-NATIVE] SESSION_START source={} generation={} media={} elapsedTicks={}",
+                    source,e.timeline.generation(),track.mediaKey(),elapsed);
+            broadcast(level.getServer(),source,e);
+        }
+    }
+    /** Real native setTheItem starts/stops playback even when the media stays identical.
+     * Invalidate only an existing native occurrence; never admit sources or create interest here. */
+    public static void nativeRecordChanged(net.minecraft.server.level.ServerLevel level,net.minecraft.core.BlockPos pos) {
+        var source=GlobalPos.of(level.dimension(),pos); var e=SOURCES.get(source);
+        if(e!=null && e.nativeElapsedTicks>=0) stop(level.getServer(),source,e,level.getGameTime(),"NATIVE_RECORD_CHANGED");
     }
     private static void removePlayer(net.minecraft.world.entity.player.Player player) {
         WATCHERS.remove(player.getUUID()); BUDGETS.remove(player.getUUID());

@@ -18,6 +18,7 @@ public final class SourceStateChecks {
     private static int checks;
 
     public static void main(String[] args) {
+        NativeDiscChecks.run();
         SessionHandoffChecks.run();
         LocalCanonicalChecks.run();
         RetentionChecks.run();

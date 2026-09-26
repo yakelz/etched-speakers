@@ -41,6 +41,16 @@ public final class OriginalStreamChecks {
     }
     @FunctionalInterface private interface RunnableIo { void run() throws Exception; }
     public static void main(String[] args) throws Exception {
+        var nativeDecoder=new Decoder(10000); var nativeReader=new RemoteSound.FrameReader(nativeDecoder);
+        var nativeClock=new net.yakel.etchedspeakers.source.model.NativeDiscClock(2,0,0);
+        long nativeFrame=StreamPreparation.submit(()->RemoteSound.preRoll(nativeReader,rate->nativeClock.target(rate,0),()->false),()->{}).get(5,TimeUnit.SECONDS);
+        check(nativeFrame==4410 && nativeReader.frames==4410,"native ticks use opened decoder format in real remote pre-roll");
+        check(nativeDecoder.readerThread!=Thread.currentThread(),"native decode-discard stays off caller thread");
+        check(nativeReader.read(2).getShort()==(short)4410,"first audible sample follows native target, including decoder carry");
+        nativeReader.close();
+        var nativeCancelled=new Decoder(100); var nativeCancelledReader=new RemoteSound.FrameReader(nativeCancelled);
+        fails(IOException.class,()->RemoteSound.preRoll(nativeCancelledReader,rate->40,()->true),"native preparation cancellation rejects stale work");
+        check(nativeCancelled.reads==0,"cancelled native generation never decodes"); nativeCancelledReader.close();
         var decoder=new Decoder(1000); var reader=new RemoteSound.FrameReader(decoder);
         var target=new AtomicLong(5); var queries=new AtomicInteger();
         OriginalStreamPreparation.advance(reader,()->queries.incrementAndGet()>1?target.updateAndGet(v->9):5,()->44100,()->true);

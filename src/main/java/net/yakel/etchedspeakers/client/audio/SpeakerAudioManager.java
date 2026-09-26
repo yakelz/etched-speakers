@@ -29,6 +29,7 @@ public final class SpeakerAudioManager {
     private int untilSearch;
     private List<GlobalPos> selected = List.of();
     private Map<GlobalPos, SpeakerRequest> previous = Map.of();
+    private final Map<GlobalPos, String> activationDiagnostics = new HashMap<>();
 
     public void tick(Minecraft client) {
         if (level != client.level) {
@@ -43,6 +44,7 @@ public final class SpeakerAudioManager {
         if (untilSearch-- <= 0) {
             untilSearch = SEARCH_INTERVAL - 1;
             selected = discover(client, sources);
+            activationDiagnostics.keySet().retainAll(selected);
         }
         var desired = new LinkedHashMap<GlobalPos, SpeakerRequest>();
         for (var key : selected) {
@@ -114,6 +116,20 @@ public final class SpeakerAudioManager {
         var state = sources.computeIfAbsent(source, ignored -> EtchedAudioBridge.read(client, speaker));
         var local = state.sourceSound().map(MasterSessions::find).orElseGet(()->MasterSessions.local(source));
         var master = RemotePlayback.choose(source, local, state.currentTrack().isPresent());
+        if (state.type().orElse(null) == net.yakel.etchedspeakers.source.model.SourceType.VANILLA_JUKEBOX) {
+            var original = ((gg.moonflower.etched.core.mixin.client.render.LevelRendererAccessor)
+                    client.levelRenderer).getPlayingJukeboxSongs().get(source.pos());
+            String evidence = source + ",state:" + state.reason()
+                    + ",sound:" + (original == null ? "none" : AudioDiagnostics.identity(original))
+                    + ",soundActive:" + (original != null && client.getSoundManager().isActive(original))
+                    + ",localMaster:" + (local == null ? "none" : local.diagnostic().id)
+                    + ",chosenMaster:" + (master == null ? "none" : master.diagnostic().id)
+                    + "," + RemotePlayback.activationDiagnostic(source);
+            if (!evidence.equals(activationDiagnostics.put(key, evidence))) {
+                net.yakel.etchedspeakers.EtchedSpeakers.LOGGER.info(
+                        "[ES-VANILLA-ACT] CLIENT_ROUTE source={} speaker={} reason={}", source, key.pos(), evidence);
+            }
+        }
         var track = master!=null && !master.isRemote() && state.currentTrack().isPresent()
                 ? state.currentTrack().get() : RemotePlayback.track(source);
         if(track==null) {
@@ -141,6 +157,7 @@ public final class SpeakerAudioManager {
         AudioThreadBridge.execute(() -> MasterSessions.applyDesired(Map.of(), Map.of(), reason));
         previous = Map.of();
         selected = List.of();
+        activationDiagnostics.clear();
         untilSearch = 0;
         level = null;
     }
