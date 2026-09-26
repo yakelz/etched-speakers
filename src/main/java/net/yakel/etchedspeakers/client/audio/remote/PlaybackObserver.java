@@ -28,6 +28,7 @@ public final class PlaybackObserver {
         Minecraft.getInstance().execute(()->send(Minecraft.getInstance(),observation,true));
     }
     private static boolean send(Minecraft client, MasterPlaybackSession.Observation o, boolean eof) {
+        if(LocalSourceSync.owned(o.source())) return false;
         if(client.player==null || client.level==null || !client.level.dimension().equals(o.source().dimension())
                 || client.player.distanceToSqr(net.minecraft.world.phys.Vec3.atCenterOf(o.source().pos()))>64*64) return false;
         var pos=o.source().pos(); var chunk=client.level.getChunkSource().getChunkNow(pos.getX()>>4,pos.getZ()>>4);
@@ -41,7 +42,7 @@ public final class PlaybackObserver {
         if(!eof && chunk.getBlockEntity(pos) instanceof AlbumJukeboxBlockEntity album) {
             slot=album.getPlayingIndex(); index=album.getTrack();
         }
-        PacketDistributor.sendToServer(new Report(o.source(),o.media(),slot,index,o.id(),o.frame(),o.rate(),o.paused(),eof));
+        PacketDistributor.sendToServer(new Report(o.source(),o.media(),slot,index,o.id(),LocalSourceSync.reportedFrame(o),o.rate(),o.paused(),eof));
         return true;
     }
     public static void clear() { SENT.clear(); }

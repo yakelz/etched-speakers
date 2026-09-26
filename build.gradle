@@ -84,11 +84,21 @@ runs {
     }
 
     client {
+        // Optional isolated second player for localhost multiplayer testing with one account.
+        if (project.hasProperty('localTestPlayer')) {
+            def testPlayer = project.property('localTestPlayer').toString()
+            if (!(testPlayer in ['ListenerA', 'ListenerB'])) throw new GradleException('Use ListenerA or ListenerB')
+            workingDirectory project.layout.projectDirectory.dir("run/multiplayer-test/${testPlayer}")
+            arguments.addAll '--username', testPlayer, '--uuid', UUID.nameUUIDFromBytes(
+                    "OfflinePlayer:${testPlayer}".getBytes(java.nio.charset.StandardCharsets.UTF_8)).toString()
+            jvmArguments.addAll '-Xms512m', '-Xmx2G'
+        }
         // Comma-separated list of namespaces to load gametests from. Empty = all namespaces.
         systemProperty 'neoforge.enabledGameTestNamespaces', project.mod_id
     }
 
     server {
+        if (project.hasProperty('retentionProbe')) systemProperty 'etchedspeakers.retentionProbe', 'true'
         systemProperty 'neoforge.enabledGameTestNamespaces', project.mod_id
         argument '--nogui'
     }
@@ -201,3 +211,20 @@ idea {
         downloadJavadoc = true
     }
 }
+
+// Real pre-roll implementation exercised with deterministic synthetic PCM; no game/OpenAL startup.
+sourceSets {
+    audioTest {
+        java.srcDir 'src/audioTest/java'
+        compileClasspath += sourceSets.main.output + sourceSets.main.compileClasspath
+        runtimeClasspath += sourceSets.main.output + sourceSets.main.runtimeClasspath
+    }
+}
+tasks.register('originalStreamTest', JavaExec) {
+    group = 'verification'
+    dependsOn tasks.named('audioTestClasses')
+    classpath = sourceSets.audioTest.runtimeClasspath
+    mainClass = 'net.yakel.etchedspeakers.client.audio.remote.OriginalStreamChecks'
+    javaLauncher = javaToolchains.launcherFor { languageVersion = JavaLanguageVersion.of(21) }
+}
+tasks.named('check') { dependsOn tasks.named('originalStreamTest') }

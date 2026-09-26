@@ -38,3 +38,28 @@ run/
 **/src/generated/**/.cache/
 repo/
 !**/src/**/repo/
+
+# Local dependencies; keep gradle/wrapper/gradle-wrapper.jar in Git.
+/libs/*.jar
+
+# Additional development runs and runtime output.
+/run-data/
+/runs/
+/logs/
+/crash-reports/
+*.log
+*.class
+*.hprof
+*.jfr
+hs_err_pid*
+replay_pid*
+
+# Local environment and operating-system files.
+.env
+.env.*
+!.env.example
+Thumbs.db
+Desktop.ini
+*.swp
+*.swo
+*~

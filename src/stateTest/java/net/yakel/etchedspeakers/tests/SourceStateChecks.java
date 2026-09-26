@@ -18,6 +18,8 @@ public final class SourceStateChecks {
     private static int checks;
 
     public static void main(String[] args) {
+        LocalCanonicalChecks.run();
+        RetentionChecks.run();
         StreamingRecoveryChecks.run();
         RemoteSessionChecks.run();
         var a = url("https://example.invalid/a?token=secret", 0, 0);

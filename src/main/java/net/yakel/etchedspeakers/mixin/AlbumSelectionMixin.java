@@ -14,8 +14,23 @@ import org.spongepowered.asm.mixin.injection.callback.CallbackInfoReturnable;
 @Mixin(value=AlbumJukeboxMenu.class,remap=false)
 public abstract class AlbumSelectionMixin {
     @Shadow @Final private BlockPos pos;
+    @Unique private int etchedspeakers$previousSlot, etchedspeakers$previousTrack;
+    @Inject(method="setPlayingTrack",at=@At("HEAD"),remap=false)
+    private void etchedspeakers$beforeSelection(Level level, SetAlbumJukeboxTrackPacket packet, CallbackInfoReturnable<Boolean> ci) {
+        if(level instanceof ServerLevel server) {
+            var chunk=server.getChunkSource().getChunkNow(pos.getX()>>4,pos.getZ()>>4);
+            if(chunk!=null && chunk.getBlockEntity(pos) instanceof gg.moonflower.etched.common.blockentity.AlbumJukeboxBlockEntity album) {
+                etchedspeakers$previousSlot=album.getPlayingIndex(); etchedspeakers$previousTrack=album.getTrack();
+            }
+        }
+    }
     @Inject(method="setPlayingTrack",at=@At("RETURN"),remap=false)
     private void etchedspeakers$selection(Level level, SetAlbumJukeboxTrackPacket packet, CallbackInfoReturnable<Boolean> ci) {
-        if(level instanceof ServerLevel server && ci.getReturnValue()) RemoteSessions.explicitSelection(server,pos);
+        if(level instanceof ServerLevel server) {
+            var chunk=server.getChunkSource().getChunkNow(pos.getX()>>4,pos.getZ()>>4);
+            if(chunk!=null && chunk.getBlockEntity(pos) instanceof gg.moonflower.etched.common.blockentity.AlbumJukeboxBlockEntity album
+                    && (ci.getReturnValue() || album.getPlayingIndex()!=etchedspeakers$previousSlot || album.getTrack()!=etchedspeakers$previousTrack))
+                RemoteSessions.explicitSelection(server,pos);
+        }
     }
 }

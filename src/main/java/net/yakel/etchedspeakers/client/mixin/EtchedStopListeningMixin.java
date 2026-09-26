@@ -13,6 +13,10 @@ import org.spongepowered.asm.mixin.injection.callback.CallbackInfo;
 @Mixin(value = StopListeningSound.class, remap = false)
 public abstract class EtchedStopListeningMixin {
     @Shadow private boolean ignoringEvents;
+    @Inject(method="onStop",at=@At("HEAD"),cancellable=true,remap=false)
+    private void etchedspeakers$canonicalStop(CallbackInfo ci) {
+        if(!ignoringEvents && net.yakel.etchedspeakers.client.audio.remote.LocalSourceSync.stopped((SoundInstance)(Object)this)) ci.cancel();
+    }
 
     @Inject(method = "stopListening", at = @At("HEAD"), remap = false)
     private void etchedspeakers$listenerDisabled(CallbackInfo callback) {

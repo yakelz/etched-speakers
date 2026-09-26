@@ -31,7 +31,7 @@ public final class EtchedSpeakersClient {
 
     @SubscribeEvent
     public static void unload(LevelEvent.Unload event) {
-        if (event.getLevel() instanceof ClientLevel) AudioDiagnostics.reset("WORLD_UNLOAD");
+        if (event.getLevel() instanceof ClientLevel) AUDIO.reset(Minecraft.getInstance(), "WORLD_UNLOAD");
     }
 
 }

@@ -5,6 +5,7 @@ import gg.moonflower.etched.api.sound.source.AudioSource;
 import gg.moonflower.etched.client.sound.EmptyAudioStream;
 import gg.moonflower.etched.core.mixin.client.render.LevelRendererAccessor;
 import java.io.IOException;
+import net.yakel.etchedspeakers.client.audio.remote.LocalSourceSync;
 import java.util.concurrent.CompletableFuture;
 import net.minecraft.client.Minecraft;
 import net.minecraft.client.sounds.AudioStream;
@@ -25,6 +26,7 @@ public final class PcmTapInstaller {
         var pos = entry.get().getKey().immutable();
         var token = entry.get().getValue();
         var source = GlobalPos.of(level.dimension(), pos);
+        var binding=LocalSourceSync.created(source,token,owner);
         AudioDiagnostics.observe(source);
         AudioDiagnostics.event("STREAM_REQUEST", "source=" + SpeakerRequest.describe(source)
                 + " soundInstanceIdentity=" + AudioDiagnostics.identity(owner));
@@ -44,7 +46,18 @@ public final class PcmTapInstaller {
                 } else if (stream == EmptyAudioStream.INSTANCE || !PcmTap.supports(stream.getFormat())) {
                     result.complete(stream);
                 } else {
-                    result.complete(new PcmTap(owner, token, source, stream));
+                    LocalSourceSync.prepare(binding,token,stream).whenComplete((prepared,failure)->client.execute(()->{
+                        if(failure!=null) { result.completeExceptionally(failure); return; }
+                        if(client.level!=level || records.get(pos)!=token || !client.getSoundManager().isActive(token)) {
+                            try { prepared.close(); } catch(IOException ignored) {}
+                            result.complete(EmptyAudioStream.INSTANCE);
+                        } else if(prepared==EmptyAudioStream.INSTANCE) result.complete(prepared);
+                        else {
+                            var tap=new PcmTap(owner,token,source,prepared);
+                            LocalSourceSync.attached(binding,tap);
+                            result.complete(tap);
+                        }
+                    }));
                 }
             });
             return result;

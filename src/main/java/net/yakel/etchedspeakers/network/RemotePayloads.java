@@ -32,6 +32,19 @@ public final class RemotePayloads {
         };
         public Type<Report> type() { return TYPE; }
     }
+    /** Ready (token=0), assigned progress/EOF (token>0). Identity bound to subscription and decoder. */
+    public record RemoteReport(UUID epoch, GlobalPos source, long generation, String media, long master,
+            long token, long frame, int rate, boolean eof) implements CustomPacketPayload {
+        public static final Type<RemoteReport> TYPE=RemotePayloads.type("remote_observer_report");
+        public static final StreamCodec<FriendlyByteBuf,RemoteReport> CODEC=new StreamCodec<>() {
+            public RemoteReport decode(FriendlyByteBuf b) { return new RemoteReport(b.readUUID(),GlobalPos.STREAM_CODEC.decode(b),
+                    b.readVarLong(),b.readUtf(160),b.readVarLong(),b.readVarLong(),b.readVarLong(),b.readVarInt(),b.readBoolean()); }
+            public void encode(FriendlyByteBuf b, RemoteReport p) { b.writeUUID(p.epoch); GlobalPos.STREAM_CODEC.encode(b,p.source);
+                b.writeVarLong(p.generation); b.writeUtf(p.media,160); b.writeVarLong(p.master); b.writeVarLong(p.token);
+                b.writeVarLong(p.frame); b.writeVarInt(p.rate); b.writeBoolean(p.eof); }
+        };
+        public Type<RemoteReport> type() { return TYPE; }
+    }
     public record Interest(UUID epoch, ResourceLocation dimension, List<BlockPos> speakers) implements CustomPacketPayload {
         public Interest { speakers = List.copyOf(speakers); }
         public static final Type<Interest> TYPE = RemotePayloads.type("speaker_interest");
@@ -48,23 +61,28 @@ public final class RemotePayloads {
         public Type<Interest> type() { return TYPE; }
     }
     public record Snapshot(UUID epoch, GlobalPos source, long generation, String media, String location,
-            int slot, int index, long frame, int rate, long serverTick, boolean active, boolean paused, String reason)
+            int slot, int index, long frame, int rate, long serverTick, boolean active, boolean paused, String reason,
+            long observerToken, boolean remoteOwned, boolean localSource)
             implements CustomPacketPayload {
         public static final Type<Snapshot> TYPE = RemotePayloads.type("remote_snapshot");
         public static final StreamCodec<FriendlyByteBuf, Snapshot> CODEC = new StreamCodec<>() {
             public Snapshot decode(FriendlyByteBuf b) { return new Snapshot(b.readUUID(),GlobalPos.STREAM_CODEC.decode(b),
                     b.readVarLong(),b.readUtf(160),b.readUtf(8192),b.readVarInt(),b.readVarInt(),b.readVarLong(),
-                    b.readVarInt(),b.readVarLong(),b.readBoolean(),b.readBoolean(),b.readUtf(64)); }
+                    b.readVarInt(),b.readVarLong(),b.readBoolean(),b.readBoolean(),b.readUtf(64),b.readVarLong(),b.readBoolean(),b.readBoolean()); }
             public void encode(FriendlyByteBuf b, Snapshot p) { b.writeUUID(p.epoch); GlobalPos.STREAM_CODEC.encode(b,p.source);
                 b.writeVarLong(p.generation); b.writeUtf(p.media,160); b.writeUtf(p.location,8192);
                 b.writeVarInt(p.slot); b.writeVarInt(p.index); b.writeVarLong(p.frame); b.writeVarInt(p.rate);
-                b.writeVarLong(p.serverTick); b.writeBoolean(p.active); b.writeBoolean(p.paused); b.writeUtf(p.reason,64); }
+                b.writeVarLong(p.serverTick); b.writeBoolean(p.active); b.writeBoolean(p.paused); b.writeUtf(p.reason,64);
+                b.writeVarLong(p.observerToken); b.writeBoolean(p.remoteOwned); b.writeBoolean(p.localSource); }
         };
         public Type<Snapshot> type() { return TYPE; }
         @Override public String toString() { return "RemoteSnapshot[source="+source+",generation="+generation+",media="+media+"]"; }
     }
     public static void register(RegisterPayloadHandlersEvent event) {
-        var r=event.registrar("remote-1");
+        var r=event.registrar("remote-3-local-canonical");
+        r.playToServer(RemoteReport.TYPE, RemoteReport.CODEC, (p,c)->c.enqueueWork(()->{
+            if(c.player() instanceof ServerPlayer player) RemoteSessions.remoteReport(player,p);
+        }));
         r.playToServer(Report.TYPE, Report.CODEC, (p,c)->c.enqueueWork(()->{
             if(c.player() instanceof ServerPlayer player) RemoteSessions.report(player,p);
         }));

@@ -22,9 +22,6 @@ import net.yakel.etchedspeakers.client.audio.sync.PcmTap;
 
 /** Silent original-style clock channel. One decoder is handed from pre-roll worker to sound thread. */
 final class RemoteSound extends AbstractSoundInstance {
-    private static final ThreadPoolExecutor WORKERS = new ThreadPoolExecutor(2,2,30,TimeUnit.SECONDS,
-            new ArrayBlockingQueue<>(32), r->{var t=new Thread(r,"EtchedSpeakers preroll");t.setDaemon(true);return t;},
-            new ThreadPoolExecutor.AbortPolicy());
     private static final DownloadProgressListener QUIET = new DownloadProgressListener() {
         public void progressStartRequest(Component text) {} public void progressStartDownload(float size) {}
         public void progressStagePercentage(int value) {} public void progressStartLoading() {}
@@ -34,6 +31,7 @@ final class RemoteSound extends AbstractSoundInstance {
     private final String mediaLocation;
     private volatile boolean cancelled;
     private Prepared prepared;
+    private volatile FrameReader frameReader;
     private PcmTap tap;
     private boolean handedToChannel;
 
@@ -65,33 +63,34 @@ final class RemoteSound extends AbstractSoundInstance {
             opened=loader.getStream(event.getSound(random).getPath(),false).thenApply(MonoWrapper::new);
         } else {
             opened=SoundCache.getAudioStream(mediaLocation,QUIET,AudioSource.AudioFileType.FILE)
-                    .thenCompose(AudioSource::openStream).thenCompose(input -> submit(() -> decode(input), ()->close(input)));
+                    .thenCompose(AudioSource::openStream).thenCompose(input -> StreamPreparation.submit(() -> decode(input), ()->close(input)));
         }
-        return opened.thenCompose(stream -> submit(()->{
+        return opened.thenCompose(stream -> StreamPreparation.submit(()->{
             var reader=new FrameReader(stream);
             boolean transferred=false;
             try {
-                if(!PcmTap.supports(reader.getFormat()) || Math.round(reader.getFormat().getSampleRate())!=expectedRate)
+                if(!PcmTap.supports(reader.getFormat()) || expectedRate!=0 && Math.round(reader.getFormat().getSampleRate())!=expectedRate)
                     throw new IOException("Unsupported remote format/rate");
                 long start=System.nanoTime(); long frame=0;
-                int chunk=Math.max(1,expectedRate/10);
+                int chunk=Math.max(1,Math.round(reader.getFormat().getSampleRate())/10);
                 while(true) {
                     if(cancelled || System.nanoTime()-start>30_000_000_000L) throw new IOException("Preparation cancelled/timed out");
                     long wanted=target.getAsLong();
                     if(wanted<0) throw new IOException("Invalid remote target");
                     if(frame>=wanted) break;
                     var data=reader.read((int)Math.min(chunk,wanted-frame)*reader.frameBytes);
-                    if(data==null || !data.hasRemaining()) throw new EOFException("Remote target beyond media");
+                    if(data==null || !data.hasRemaining()) break; // Retain genuine EOF evidence for server-assigned handoff.
                     frame+=data.remaining()/reader.frameBytes;
                 }
                 synchronized(this) {
                     if(cancelled) throw new IOException("Cancelled preparation");
-                    prepared=new Prepared(reader,frame); transferred=true;
+                    prepared=new Prepared(reader,frame); frameReader=reader; transferred=true;
                 }
                 return (Void)null;
             } finally { if(!transferred) reader.close(); }
         },()->close(stream)));
     }
+    long eofFrame() { var reader=frameReader; return reader!=null && reader.eof ? reader.frames : -1; }
     synchronized PcmTap activate() {
         if(cancelled || prepared==null) return null;
         tap=new PcmTap(this,this,sourcePos,prepared.stream);
@@ -106,12 +105,6 @@ final class RemoteSound extends AbstractSoundInstance {
         // Once handed off, Minecraft Channel owns close; never close its decoder from this thread.
         if(!handedToChannel && tap!=null) { close(tap); tap=null; }
     }
-    private static <T> CompletableFuture<T> submit(Callable<T> task, Runnable rejectedCleanup) {
-        try { return CompletableFuture.supplyAsync(()->{
-            try { return task.call(); } catch(Exception e) { throw new CompletionException(e); }
-        },WORKERS); }
-        catch(RejectedExecutionException e) { rejectedCleanup.run(); return CompletableFuture.failedFuture(e); }
-    }
     private static AudioStream decode(InputStream input) throws Exception {
         var is=new BufferedInputStream(input); is.mark(8192);
         try {
@@ -125,11 +118,13 @@ final class RemoteSound extends AbstractSoundInstance {
     private record Prepared(FrameReader stream,long frame) {}
 
     /** Decoder may return more bytes than requested. Preserve the unused suffix across the handoff. */
-    private static final class FrameReader implements AudioStream {
+    static final class FrameReader implements AudioStream {
         private final AudioStream decoder;
-        private final int frameBytes;
+        final int frameBytes;
         private ByteBuffer carry;
         private boolean closed;
+        volatile long frames;
+        private volatile boolean eof;
         FrameReader(AudioStream decoder) {
             this.decoder=decoder; var f=decoder.getFormat(); frameBytes=f.getChannels()*f.getSampleSizeInBits()/8;
         }
@@ -141,13 +136,13 @@ final class RemoteSound extends AbstractSoundInstance {
             while(out.hasRemaining()) {
                 if(carry==null || !carry.hasRemaining()) {
                     carry=decoder.read(wanted);
-                    if(carry==null || !carry.hasRemaining()) break;
+                    if(carry==null || !carry.hasRemaining()) { eof=true; break; }
                     if(carry.remaining()%frameBytes!=0) throw new IOException("Unaligned remote PCM");
                 }
                 int n=Math.min(out.remaining(),carry.remaining()); var part=carry.duplicate();
                 part.limit(part.position()+n); out.put(part); carry.position(carry.position()+n);
             }
-            out.flip(); return out.hasRemaining()?out:null;
+            out.flip(); frames+=out.remaining()/frameBytes; return out.hasRemaining()?out:null;
         }
         public void close() throws IOException { if(!closed) { closed=true; carry=null; decoder.close(); } }
     }

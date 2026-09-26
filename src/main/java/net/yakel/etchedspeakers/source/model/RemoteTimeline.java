@@ -1,6 +1,6 @@
 package net.yakel.etchedspeakers.source.model;
 
-/** Pure canonical timeline. Server ticks anchor actual observer frames, never invent a track start. */
+/** Pure canonical timeline. A fresh listener-created session explicitly negotiates its decoder rate. */
 public final class RemoteTimeline {
     public static final int OBSERVER_LEASE = 100, SESSION_LEASE = 200, INTEREST_LEASE = 120;
     public static final long MAX_SECONDS = 6 * 60 * 60;
@@ -63,7 +63,35 @@ public final class RemoteTimeline {
         frame = at(now); tick = now; active = false;
         return true;
     }
-    public long at(long now) { return project(frame, rate, now - tick, paused || !active); }
+    public void bootstrap(String key, long nextGeneration, long now) {
+        generation=nextGeneration; media=key; frame=0; rate=0; tick=lastReport=now;
+        observer=""; localId=0; offset=0; active=true; paused=false;
+    }
+    public boolean remoteProgress(long reportedFrame, int sampleRate, long now) {
+        return remoteProgress(reportedFrame,sampleRate,now,false);
+    }
+    public boolean acceptsRemoteCursor(long reportedFrame, int sampleRate, long now, boolean eof) {
+        if (!active || !valid(reportedFrame,sampleRate)) return false;
+        if (rate==0) return reportedFrame<=sampleRate*2L;
+        long delta=reportedFrame-at(now);
+        // A handoff during grace may discover that the real end was passed while nobody decoded.
+        // This wider BACKWARD window applies only to actual decoder EOF, never ordinary progress.
+        return rate==sampleRate && delta<=rate*3L && delta>=-rate*(eof?15L:3L);
+    }
+    public boolean remoteProgress(long reportedFrame, int sampleRate, long now, boolean eof) {
+        if (!acceptsRemoteCursor(reportedFrame,sampleRate,now,eof)) return false;
+        if (rate==0) {
+            rate=sampleRate;
+        }
+        frame=reportedFrame; tick=lastReport=now; paused=false;
+        return true;
+    }
+    /** Re-anchor without renewing any observer lease, including during observer handoff/grace. */
+    public void advance(long now) { if (active && rate>0) { frame=at(now); tick=now; } }
+    public boolean matches(long reportedGeneration, String reportedMedia) {
+        return active && generation==reportedGeneration && media.equals(reportedMedia);
+    }
+    public long at(long now) { return rate==0 ? 0 : project(frame, rate, now - tick, paused || !active); }
     public long generation() { return generation; }
     public int rate() { return rate; }
     public boolean active() { return active; }
