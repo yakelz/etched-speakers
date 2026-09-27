@@ -16,6 +16,13 @@ import net.yakel.etchedspeakers.remote.RemoteSessions;
 
 /** Control only. No PCM. Bounded wire fields; semantic validation belongs to the owning thread. */
 public final class RemotePayloads {
+    private static List<String> readPlaylist(FriendlyByteBuf b) {
+        int count=b.readVarInt();
+        if(count<0 || count>64) throw new IllegalArgumentException("Invalid local playlist size");
+        var result=new java.util.ArrayList<String>(count);
+        for(int i=0;i<count;i++) result.add(b.readUtf(8192));
+        return List.copyOf(result);
+    }
     public static Consumer<Snapshot> clientReceiver = ignored -> {};
     private static <T extends CustomPacketPayload> CustomPacketPayload.Type<T> type(String name) {
         return new CustomPacketPayload.Type<>(ResourceLocation.fromNamespaceAndPath(EtchedSpeakers.MOD_ID, name));
@@ -65,24 +72,25 @@ public final class RemotePayloads {
     }
     public record Snapshot(UUID epoch, GlobalPos source, long generation, String media, String location,
             int slot, int index, long frame, int rate, long serverTick, boolean active, boolean paused, String reason,
-            long observerToken, boolean remoteOwned, boolean localSource, long nativeElapsedTicks)
+            long observerToken, boolean remoteOwned, boolean localSource, long nativeElapsedTicks, net.yakel.etchedspeakers.source.model.OriginalSourceKind sourceKind, List<String> sourcePlaylist)
             implements CustomPacketPayload {
+        public Snapshot { sourcePlaylist=List.copyOf(sourcePlaylist); if(sourcePlaylist.size()>64) throw new IllegalArgumentException("Invalid local playlist size"); }
         public static final Type<Snapshot> TYPE = RemotePayloads.type("remote_snapshot");
         public static final StreamCodec<FriendlyByteBuf, Snapshot> CODEC = new StreamCodec<>() {
             public Snapshot decode(FriendlyByteBuf b) { return new Snapshot(b.readUUID(),GlobalPos.STREAM_CODEC.decode(b),
                     b.readVarLong(),b.readUtf(160),b.readUtf(8192),b.readVarInt(),b.readVarInt(),b.readVarLong(),
-                    b.readVarInt(),b.readVarLong(),b.readBoolean(),b.readBoolean(),b.readUtf(64),b.readVarLong(),b.readBoolean(),b.readBoolean(),b.readVarLong()); }
+                    b.readVarInt(),b.readVarLong(),b.readBoolean(),b.readBoolean(),b.readUtf(64),b.readVarLong(),b.readBoolean(),b.readBoolean(),b.readVarLong(),b.readEnum(net.yakel.etchedspeakers.source.model.OriginalSourceKind.class),readPlaylist(b)); }
             public void encode(FriendlyByteBuf b, Snapshot p) { b.writeUUID(p.epoch); GlobalPos.STREAM_CODEC.encode(b,p.source);
                 b.writeVarLong(p.generation); b.writeUtf(p.media,160); b.writeUtf(p.location,8192);
                 b.writeVarInt(p.slot); b.writeVarInt(p.index); b.writeVarLong(p.frame); b.writeVarInt(p.rate);
                 b.writeVarLong(p.serverTick); b.writeBoolean(p.active); b.writeBoolean(p.paused); b.writeUtf(p.reason,64);
-                b.writeVarLong(p.observerToken); b.writeBoolean(p.remoteOwned); b.writeBoolean(p.localSource); b.writeVarLong(p.nativeElapsedTicks); }
+                b.writeVarLong(p.observerToken); b.writeBoolean(p.remoteOwned); b.writeBoolean(p.localSource); b.writeVarLong(p.nativeElapsedTicks); b.writeEnum(p.sourceKind); b.writeCollection(p.sourcePlaylist,(b2,value)->b2.writeUtf(value,8192)); }
         };
         public Type<Snapshot> type() { return TYPE; }
         @Override public String toString() { return "RemoteSnapshot[source="+source+",generation="+generation+",media="+media+"]"; }
     }
     public static void register(RegisterPayloadHandlersEvent event) {
-        var r=event.registrar("remote-5-native-timeline");
+        var r=event.registrar("remote-7-local-original-recovery");
         r.playToServer(RemoteReport.TYPE, RemoteReport.CODEC, (p,c)->c.enqueueWork(()->{
             if(c.player() instanceof ServerPlayer player) RemoteSessions.remoteReport(player,p);
         }));

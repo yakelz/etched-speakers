@@ -40,7 +40,7 @@ public final class RemotePlayback {
         RemotePayloads.clientReceiver=RemotePlayback::snapshot;
         if(level!=client.level) { reset("LEVEL_CHANGE"); level=client.level; }
         if(level==null || client.player==null || client.isPaused()) return;
-        ticks++; LocalSourceSync.tick(client); INTEREST.clear(); SPEAKERS.clear(); PlaybackObserver.tick(client);
+        ticks++; LocalSourceSync.tick(client); NativeOriginalRecovery.tick(); INTEREST.clear(); SPEAKERS.clear(); PlaybackObserver.tick(client);
         var iterator=ENTRIES.entrySet().iterator();
         while(iterator.hasNext()) {
             var item=iterator.next(); var e=item.getValue();
@@ -130,7 +130,7 @@ public final class RemotePlayback {
     private static void snapshot(Snapshot s) {
         var client=Minecraft.getInstance();
         if(s.nativeElapsedTicks()!=-1 && (!NativeDiscClock.validTicks(s.nativeElapsedTicks())
-                || s.rate()!=0 || s.frame()!=0 || s.localSource() || s.remoteOwned()
+                || s.rate()!=0 || s.frame()!=0 || s.remoteOwned()
                 || s.active() && !gg.moonflower.etched.api.record.TrackData.isLocalSound(s.location()))) return;
         if(level==null || client.level!=level || !s.epoch().equals(epoch) || !s.source().dimension().equals(level.dimension())
                 || !(RemoteTimeline.valid(s.frame(),s.rate()) || s.rate()==0 && s.frame()==0) || s.generation()<=0) return;
@@ -140,7 +140,10 @@ public final class RemotePlayback {
                     s.location(),Optional.empty(),-1,-1);
             if(!track.mediaKey().equals(s.media()) || s.slot() < -1 || s.index() < -1) return;
         }
-        if(s.localSource()) { LocalSourceSync.snapshot(s); return; }
+        if(s.localSource()) {
+            if(s.nativeElapsedTicks()>=0) NativeOriginalRecovery.snapshot(s); else LocalSourceSync.snapshot(s);
+            return;
+        }
         if(!INTEREST.containsKey(s.source())) return;
         var e=ENTRIES.computeIfAbsent(s.source(),ignored->new Entry());
         if(e.snapshot!=null && !RemoteTimeline.acceptsSnapshot(s.generation(),s.serverTick(),e.snapshot.generation(),e.snapshot.serverTick())) return;
@@ -202,7 +205,7 @@ public final class RemotePlayback {
         e.master=null; e.lastHead=null; e.terminalFrame=-1; e.lastReport=-20; e.announcedMaster=0;
     }
     public static void reset(String reason) {
-        LocalSourceSync.reset(reason);
+        LocalSourceSync.reset(reason); NativeOriginalRecovery.reset();
         ENTRIES.forEach((s,e)->close(s,e,reason)); ENTRIES.clear(); INTEREST.clear(); SPEAKERS.clear();
         sentSpeakers=Set.of(); lastInterest=-40;
         PlaybackObserver.clear(); epoch=UUID.randomUUID(); untilInterest=0; ticks=0; level=null;

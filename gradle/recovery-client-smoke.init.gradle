@@ -1,0 +1,25 @@
+allprojects {
+    afterEvaluate {
+        sourceSets.create('clientTest') {
+            java.srcDir 'src/clientTest/java'
+            compileClasspath += sourceSets.main.output + sourceSets.main.compileClasspath
+            runtimeClasspath += sourceSets.main.output + sourceSets.main.runtimeClasspath
+        }
+        tasks.configureEach { if (name == 'runClient') {
+            dependsOn tasks.named('clientTestClasses')
+            doFirst {
+                def fixtureDir = project.file('run/recovery-client-smoke')
+                fixtureDir.mkdirs()
+                workingDir fixtureDir
+                environment 'MOD_CLASSES', (sourceSets.main.output.files + sourceSets.clientTest.output.classesDirs.files)
+                        .collect { 'etchedspeakers%%' + it.absolutePath }.join(File.pathSeparator)
+                systemProperty 'etchedspeakers.originalClientValidation', 'true'
+            }
+            doLast {
+                def evidence = project.file('run/recovery-client-smoke/logs/latest.log').getText('UTF-8')
+                if (!evidence.contains('[ES-ORIGINAL-CLIENT-TEST] PASS') || evidence.contains('[ES-ORIGINAL-CLIENT-TEST] FAIL'))
+                    throw new GradleException('Original recovery client smoke check failed')
+            }
+        } }
+    }
+}

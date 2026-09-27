@@ -1,0 +1,37 @@
+// Isolated integration fixture; its classes are never added to the shipping JAR.
+allprojects {
+    afterEvaluate {
+        sourceSets.create('serverTest') {
+            java.srcDir 'src/serverTest/java'
+            compileClasspath += sourceSets.main.output + sourceSets.main.compileClasspath
+            runtimeClasspath += sourceSets.main.output + sourceSets.main.runtimeClasspath
+        }
+        tasks.configureEach { if (name == 'runServer') {
+            dependsOn tasks.named('serverTestClasses')
+            doFirst {
+                def fixtureDir = project.file('run/local-original-server')
+                fixtureDir.mkdirs()
+                def properties = new File(fixtureDir, 'server.properties')
+                if (!properties.exists()) properties.text = '''server-ip=127.0.0.1
+server-port=25579
+online-mode=false
+level-name=local-original-world
+level-type=minecraft:normal
+generate-structures=false
+view-distance=2
+simulation-distance=2
+max-players=1
+'''
+                workingDir fixtureDir
+                environment 'MOD_CLASSES', (sourceSets.main.output.files + sourceSets.serverTest.output.classesDirs.files)
+                        .collect { 'etchedspeakers%%' + it.absolutePath }.join(File.pathSeparator)
+                systemProperty 'etchedspeakers.localOriginalValidation', 'true'
+            }
+            doLast {
+                def evidence = project.file('run/local-original-server/logs/latest.log').getText('UTF-8')
+                if (!evidence.contains('[ES-LOCAL-ONLY-TEST] PASS') || evidence.contains('[ES-LOCAL-ONLY-TEST] FAIL'))
+                    throw new GradleException('Local-only original runtime checks failed; inspect the isolated server log')
+            }
+        } }
+    }
+}

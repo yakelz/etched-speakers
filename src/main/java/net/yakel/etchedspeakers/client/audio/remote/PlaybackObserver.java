@@ -25,7 +25,7 @@ public final class PlaybackObserver {
     }
     public static void eof(MasterPlaybackSession.Observation observation) {
         if(observation==null) return;
-        Minecraft.getInstance().execute(()->send(Minecraft.getInstance(),observation,true));
+        Minecraft.getInstance().execute(()->{ LocalSourceSync.decoderEnded(observation); send(Minecraft.getInstance(),observation,true); });
     }
     private static boolean send(Minecraft client, MasterPlaybackSession.Observation o, boolean eof) {
         if(LocalSourceSync.owned(o.source())) return LocalSourceSync.report(o,eof);
@@ -38,7 +38,8 @@ public final class PlaybackObserver {
             var master=sound==null?null:MasterSessions.find(sound);
             if(master==null || master.diagnostic().id!=o.id()) return false;
         }
-        int slot=-1,index=-1;
+        var original=((LevelRendererAccessor)client.levelRenderer).getPlayingJukeboxSongs().get(pos);
+        int slot=LocalSourceSync.observedSlot(original),index=LocalSourceSync.observedIndex(original);
         if(!eof && chunk.getBlockEntity(pos) instanceof AlbumJukeboxBlockEntity album) {
             slot=album.getPlayingIndex(); index=album.getTrack();
         }

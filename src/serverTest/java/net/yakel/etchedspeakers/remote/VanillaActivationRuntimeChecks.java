@@ -159,6 +159,49 @@ public final class VanillaActivationRuntimeChecks {
         try { return field(net.minecraft.server.players.PlayerList.class,"playersByUUID").get(server.getPlayerList()); }
         catch(Exception e) { throw new IllegalStateException(e); }
     }
+    /** Real pushLocal and ChunkMap tracking predicate; only transport/player placement is synthetic. */
+    @SuppressWarnings("unchecked")
+    private static void recoveryDelivery() throws Exception {
+        var server=player.getServer(); var level=player.serverLevel(); var received=new ArrayList<Snapshot>();
+        var profile=new GameProfile(new UUID(777,777),"OriginalRecoveryProbe");
+        var local=new ServerPlayer(server,level,profile,ClientInformation.createDefault());
+        local.setPos(SOURCE.getX()+1,SOURCE.getY()+1,SOURCE.getZ()+1);
+        local.connection=new ServerGamePacketListenerImpl(server,new Connection(PacketFlow.SERVERBOUND),local,
+                CommonListenerCookie.createInitial(profile,false)) {
+            @Override public void send(Packet<?> packet,PacketSendListener listener) {
+                if(packet instanceof ClientboundCustomPayloadPacket custom && custom.payload() instanceof Snapshot s) received.add(s);
+            }
+        };
+        var players=(Map<UUID,ServerPlayer>)getPlayers(server); players.put(local.getUUID(),local);
+        var chunkMap=level.getChunkSource().chunkMap;
+        var playerMap=(net.minecraft.server.level.PlayerMap)field(chunkMap.getClass(),"playerMap").get(chunkMap);
+        playerMap.addPlayer(local,false);
+        var entry=sessions.get(source);
+        var push=RemoteSessions.class.getDeclaredMethod("pushLocal",net.minecraft.server.MinecraftServer.class,GlobalPos.class,entry.getClass(),boolean.class);
+        push.setAccessible(true);
+        try {
+            RemoteSessions.interest(local,new Interest(new UUID(888,888),level.dimension().location(),List.of()));
+            push.invoke(null,server,source,entry,true);
+            check(received.isEmpty(),"near player without chunk tracking receives no original recovery");
+            local.setChunkTrackingView(net.minecraft.server.level.ChunkTrackingView.of(new ChunkPos(SOURCE),2));
+            push.invoke(null,server,source,entry,true);
+            var current=received.getLast();
+            check(current.localSource() && current.active() && current.nativeElapsedTicks()>=600,"tracking original recipient gets real active native elapsed without Speaker subscription");
+            check(current.generation()==timeline().generation() && current.media().equals(latest().media()),"original delivery keeps same canonical occurrence/media");
+            check(current.rate()==0 && !current.remoteOwned() && current.observerToken()==0,"native recovery does not introduce observer authority or guessed PCM format");
+            local.setPos(SOURCE.getX()+500,SOURCE.getY()+1,SOURCE.getZ()+1);
+            push.invoke(null,server,source,entry,true);
+            check(!received.getLast().active() && received.getLast().reason().equals("SOURCE_NOT_TRACKED"),"remote-only listener loses original lease even if source chunk remains tracked");
+            local.setPos(SOURCE.getX()+1,SOURCE.getY()+1,SOURCE.getZ()+1);
+            push.invoke(null,server,source,entry,true);
+            check(received.getLast().active() && received.getLast().generation()==current.generation(),"return near source recovers same occurrence");
+            jukebox.setTheItem(ItemStack.EMPTY);
+            check(!received.getLast().active(),"real eject invalidates original recovery recipient immediately");
+        } finally {
+            playerMap.removePlayer(local); players.remove(local.getUUID());
+            RemoteSessions.logout(new net.neoforged.neoforge.event.entity.player.PlayerEvent.PlayerLoggedOutEvent(local));
+        }
+    }
     private static void nativeStep(long now) throws Exception {
         var level=player.serverLevel();
         if(phase==2) {
@@ -192,6 +235,7 @@ public final class VanillaActivationRuntimeChecks {
             check(timeline().rate()==0 && timeline().generation()==generation,"native client reports cannot set clock or generation");
             check(new net.yakel.etchedspeakers.source.model.NativeDiscClock(s.nativeElapsedTicks(),0,0).target(48000,0)>=1_440_000,
                     "real late snapshot projects at least thirty seconds of PCM");
+            recoveryDelivery();
             jukebox.setTheItem(ItemStack.EMPTY);
             check(!timeline().active() && !latest().active(),"eject immediately invalidates native occurrence");
             jukebox.setTheItem(new ItemStack(net.minecraft.world.item.Items.MUSIC_DISC_CREATOR));

@@ -18,6 +18,11 @@ public abstract class SoundEngineLifecycleMixin {
     @Shadow @Final private SoundEngineExecutor executor;
     @Unique private String etchedspeakers$cleanupReason = "SOUND_ENGINE_STOP_ALL";
 
+    @Inject(method = "updateCategoryVolume", at = @At("HEAD"))
+    private void etchedspeakers$volume(net.minecraft.sounds.SoundSource category, float volume, CallbackInfo callback) {
+        net.yakel.etchedspeakers.client.audio.remote.OriginalAudio.volumeChanged(category,volume);
+    }
+
     @Inject(method = "reload", at = @At("HEAD"))
     private void etchedspeakers$reloadStart(CallbackInfo callback) {
         etchedspeakers$cleanupReason = "RESOURCE_RELOAD";

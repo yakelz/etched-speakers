@@ -13,13 +13,14 @@ public final class OriginalStreamChecks {
     private static void check(boolean ok,String message) { if(!ok) throw new AssertionError(message); checks++; }
     private static final class Decoder implements AudioStream {
         final int total;
+        int rate=44100;
         int frame, closes, reads;
         Thread readerThread;
         boolean empty, invalid, fail;
         final CountDownLatch entered=new CountDownLatch(1), release=new CountDownLatch(1);
         boolean blocked;
         Decoder(int total) { this.total=total; }
-        public AudioFormat getFormat() { return new AudioFormat(44100,16,1,true,false); }
+        public AudioFormat getFormat() { return new AudioFormat(rate,16,1,true,false); }
         public ByteBuffer read(int requested) throws IOException {
             readerThread=Thread.currentThread(); reads++;
             if(blocked) { entered.countDown(); try { if(!release.await(5,TimeUnit.SECONDS)) throw new IOException("timeout"); }
@@ -89,6 +90,30 @@ public final class OriginalStreamChecks {
         async.release.countDown();
         fails(ExecutionException.class,()->future.get(5,TimeUnit.SECONDS),"worker observes cancellation before handoff");
         check(async.closes==1,"worker closes cancelled decoder once");
+        var recovery=new PreparedOriginalStream(); var recoveryDecoder=new Decoder(10000); recoveryDecoder.rate=48000;
+        recovery.prepare(recoveryDecoder,r->new net.yakel.etchedspeakers.source.model.NativeDiscClock(2,0,0).target(r,0)).get(5,TimeUnit.SECONDS);
+        check(recovery.frame()==4800 && recovery.rate()==48000,"production native original pre-roll uses actual 48k format");
+        check(recoveryDecoder.readerThread!=Thread.currentThread(),"original recovery decodes on worker");
+        var audible=recovery.take();
+        check(audible.read(2).getShort()==(short)4800,"recovered native original first audible sample is exact target");
+        recovery.cancel(); check(recoveryDecoder.closes==0,"controller cancellation cannot close Channel-owned decoder");
+        audible.close(); audible.close(); check(recoveryDecoder.closes==1,"Channel closes recovered stream exactly once");
+        fails(IOException.class,recovery::take,"decoder cannot be handed off twice");
+        var cancelledRecovery=new PreparedOriginalStream(); var blockedDecoder=new Decoder(100); blockedDecoder.blocked=true;
+        var pending=cancelledRecovery.prepare(blockedDecoder,r->50);
+        check(blockedDecoder.entered.await(5,TimeUnit.SECONDS),"recovery worker entered real read");
+        cancelledRecovery.cancel(); check(blockedDecoder.closes==0,"native cancel does not cross-close blocked worker");
+        blockedDecoder.release.countDown();
+        fails(ExecutionException.class,()->pending.get(5,TimeUnit.SECONDS),"cancelled recovery cannot publish");
+        check(blockedDecoder.closes==1,"cancelled recovery closed by worker exactly once");
+        var eofRecovery=new PreparedOriginalStream(); var eofDecoder=new Decoder(4);
+        fails(ExecutionException.class,()->eofRecovery.prepare(eofDecoder,r->40).get(5,TimeUnit.SECONDS),"EOF before recovery target fails rather than replaying zero");
+        check(eofDecoder.closes==1,"EOF preparation closes once");
+        var readyRecovery=new PreparedOriginalStream(); var readyDecoder=new Decoder(100);
+        readyRecovery.prepare(readyDecoder,r->5).get(5,TimeUnit.SECONDS);
+        readyRecovery.catchUp(r->9).get(5,TimeUnit.SECONDS);
+        check(readyRecovery.frame()==9,"late render handoff catches up off-thread with same decoder");
+        readyRecovery.cancel(); readyRecovery.cancel(); check(readyDecoder.closes==1,"waiting decoder cancellation closes once");
         System.out.println("Original stream checks: "+checks+" PASS");
     }
 }

@@ -3,7 +3,11 @@ package net.yakel.etchedspeakers.source.model;
 /** Pure reconciliation guards. No decoder, Minecraft clock or server authority lives here. */
 public final class CanonicalAlignment {
     private CanonicalAlignment() {}
-    public record Identity(Object source, long generation, String media, int slot, int index) {}
+    public record Identity(Object source, long generation, String media, int slot, int index, OriginalSourceKind kind) {
+        public Identity(Object source,long generation,String media,int slot,int index) {
+            this(source,generation,media,slot,index,OriginalSourceKind.UNKNOWN);
+        }
+    }
     public static boolean accepts(Identity next, long tick, Identity previous, long previousTick) {
         return next.generation()>0 && (previous==null || next.source().equals(previous.source())
                 && RemoteTimeline.acceptsSnapshot(next.generation(),tick,previous.generation(),previousTick)

@@ -15,6 +15,12 @@ import org.spongepowered.asm.mixin.injection.callback.CallbackInfo;
 public abstract class VanillaActivationDiagnosticsMixin {
     @Unique private boolean etchedspeakers$wasEmpty;
 
+    @Inject(method="tick",at=@At("RETURN"))
+    private static void etchedspeakers$observeNative(net.minecraft.world.level.Level level,net.minecraft.core.BlockPos pos,
+            net.minecraft.world.level.block.state.BlockState state,JukeboxBlockEntity jukebox,CallbackInfo ci) {
+        if(level instanceof ServerLevel server) RemoteSessions.observeLocalNative(server,jukebox);
+    }
+
     @Inject(method = "setTheItem", at = @At("HEAD"))
     private void etchedspeakers$beforeRecord(ItemStack item, CallbackInfo ci) {
         etchedspeakers$wasEmpty = ((JukeboxBlockEntity) (Object) this).getTheItem().isEmpty();

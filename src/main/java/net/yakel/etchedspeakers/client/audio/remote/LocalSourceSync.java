@@ -33,19 +33,23 @@ public final class LocalSourceSync {
     private static final Map<GlobalPos,Entry> SOURCES=new HashMap<>();
     private static final Map<SoundInstance,Binding> BINDINGS=new WeakHashMap<>();
     private static final Map<Long,Aligned> ALIGNED=new HashMap<>();
+    private static final Map<GlobalPos,BlockTrack> BLOCK_TRACKS=new HashMap<>();
+    private record BlockTrack(ClientLevel world,List<gg.moonflower.etched.api.record.TrackData> tracks,int index) {}
+    private static final Map<GlobalPos,OriginalSourceKind> MUTED_STARTS=new HashMap<>();
     private static boolean controlled;
     private static long lastSample;
     private static long terminalSequence=1L<<60; // Separate namespace from real master ids; client-thread only.
     private static final class Entry {
         Snapshot snapshot;
         volatile Clock clock;
-        long heard;
-        boolean exhausted;
+        long heard, eventFence=-1;
+        boolean exhausted, volumeLost;
+        OriginalRecovery recovery=new OriginalRecovery();
         PreparedEnd preparedEnd;
         Identity attempted;
         long attemptedAt;
         final DriftGate drift=new DriftGate();
-        Identity identity() { var s=snapshot; return new Identity(s.source(),s.generation(),s.media(),s.slot(),s.index()); }
+        Identity identity() { var s=snapshot; return new Identity(s.source(),s.generation(),s.media(),s.slot(),s.index(),s.sourceKind()); }
     }
     private static final class PreparedEnd {
         final long id=++terminalSequence,frame;
@@ -66,6 +70,10 @@ public final class LocalSourceSync {
         final ClientLevel world;
         final String media;
         final int slot,index;
+        final OriginalSourceKind kind;
+        java.lang.ref.WeakReference<MasterPlaybackSession> master;
+        long masterId;
+        boolean decoderEof;
         Identity creation;
         Preparation preparation;
         RemoteSound.FrameReader waiting;
@@ -78,8 +86,8 @@ public final class LocalSourceSync {
         }
         long offset;
         boolean ready,failed;
-        Binding(GlobalPos source,ClientLevel world,String media,int slot,int index,Identity creation) {
-            this.source=source; this.world=world; this.media=media; this.slot=slot; this.index=index; this.creation=creation;
+        Binding(GlobalPos source,ClientLevel world,String media,int slot,int index,Identity creation,OriginalSourceKind kind) {
+            this.source=source; this.world=world; this.media=media; this.slot=slot; this.index=index; this.creation=creation; this.kind=kind;
         }
     }
     private static final class Aligned {
@@ -100,6 +108,28 @@ public final class LocalSourceSync {
     public static boolean owned(GlobalPos source) {
         var e=SOURCES.get(source); return e!=null && e.snapshot.active() && e.snapshot.remoteOwned();
     }
+    private static boolean active(GlobalPos source) {
+        var e=SOURCES.get(source); return e!=null && OriginalRecovery.timelineEligible(e.snapshot.active(),e.snapshot.localSource());
+    }
+    public static int observedIndex(SoundInstance token) { var b=BINDINGS.get(token); return b==null?-1:b.index; }
+    public static int observedSlot(SoundInstance token) { var b=BINDINGS.get(token); return b==null?-1:b.slot; }
+    public static void blockRecord(BlockPos pos,gg.moonflower.etched.api.record.TrackData[] tracks,int index) {
+        if(controlled || Minecraft.getInstance().level==null || tracks.length>64) return;
+        var level=Minecraft.getInstance().level; var source=GlobalPos.of(level.dimension(),pos);
+        if(!(level.getBlockEntity(pos) instanceof net.minecraft.world.level.block.entity.JukeboxBlockEntity)) return;
+        if(BLOCK_TRACKS.size()<32 || BLOCK_TRACKS.containsKey(source)) {
+            BLOCK_TRACKS.put(source,new BlockTrack(level,List.of(tracks),index));
+            if(index<tracks.length && !OriginalAudio.audible()) MUTED_STARTS.put(source,OriginalSourceKind.VANILLA_ETCHED);
+        }
+    }
+    public static void blockPacket(BlockPos pos) {
+        var level=Minecraft.getInstance().level; if(level==null) return;
+        var source=GlobalPos.of(level.dimension(),pos); var e=SOURCES.get(source);
+        cancel(source); BLOCK_TRACKS.remove(source); MUTED_STARTS.remove(source);
+        if(e!=null) e.eventFence=e.snapshot.serverTick();
+        // Etched packet handler stops the old token; its auto-next callback must not race this explicit event.
+        var sound=original(source); if(sound!=null) silence(sound);
+    }
     public static long reportedFrame(MasterPlaybackSession.Observation o) {
         var aligned=ALIGNED.get(o.id()); return o.frame()+(aligned==null?0:aligned.offset());
     }
@@ -118,23 +148,24 @@ public final class LocalSourceSync {
     }
     public static void snapshot(Snapshot s) {
         var e=SOURCES.get(s.source());
-        if(!CanonicalAlignment.accepts(new Identity(s.source(),s.generation(),s.media(),s.slot(),s.index()),s.serverTick(),
+        if(!CanonicalAlignment.accepts(new Identity(s.source(),s.generation(),s.media(),s.slot(),s.index(),s.sourceKind()),s.serverTick(),
                 e==null?null:e.identity(),e==null?0:e.snapshot.serverTick())) return;
         if(e==null) {
-            if(!s.active() || !s.remoteOwned() || SOURCES.size()>=32) return;
+            if(!s.active() || !s.localSource() || SOURCES.size()>=32) return;
             e=new Entry(); SOURCES.put(s.source(),e);
         }
-        boolean changed=e.snapshot==null || !e.identity().equals(new Identity(s.source(),s.generation(),s.media(),s.slot(),s.index()));
+        boolean changed=e.snapshot==null || !e.identity().equals(new Identity(s.source(),s.generation(),s.media(),s.slot(),s.index(),s.sourceKind()));
         boolean wasActive=e.snapshot!=null && e.snapshot.active();
         if(changed || !s.active()) cancel(s.source());
         e.snapshot=s; e.heard=System.nanoTime();
         e.clock=new Clock(s.frame(),s.rate(),s.paused(),e.heard,
                 Math.clamp(Minecraft.getInstance().level.getGameTime()-s.serverTick(),0L,40L));
-        if(changed) { e.exhausted=false; e.preparedEnd=null; log("CANONICAL_SOURCE_VISIBLE",e,"SNAPSHOT",0); }
-        if(!s.active() || !s.remoteOwned()) {
+        if(changed) { e.eventFence=-1; e.recovery=new OriginalRecovery(); e.volumeLost=false; e.exhausted=false; e.preparedEnd=null; log("CANONICAL_SOURCE_VISIBLE",e,"SNAPSHOT",0); }
+        if(!s.active()) {
             if(wasActive) log("LOCAL_CANONICAL_RELEASE",e,s.reason(),0);
             // Grace/tracking expiry relinquishes ownership without restarting a healthy local sound.
-            if(!Set.of("GRACE_EXPIRED","SOURCE_NOT_TRACKED","LEASE_EXPIRED").contains(s.reason())) stopOriginal(s.source());
+            if(!Set.of("GRACE_EXPIRED","SOURCE_NOT_TRACKED","LEASE_EXPIRED").contains(s.reason())
+                    && !(s.reason().equals("EOF") && !s.remoteOwned())) stopOriginal(s.source());
         }
     }
     private static AlbumJukeboxBlockEntity album(GlobalPos source) {
@@ -149,7 +180,18 @@ public final class LocalSourceSync {
                 && state.getValue(AlbumJukeboxBlock.HAS_RECORD);
     }
     private static boolean valid(Entry e, AlbumJukeboxBlockEntity a) {
-        if(a==null || !playable(a) || !owned(e.snapshot.source())) return false;
+        if(!active(e.snapshot.source()) || e.snapshot.serverTick()<=e.eventFence) return false;
+        if(e.snapshot.sourceKind()==OriginalSourceKind.VANILLA_ETCHED) {
+            var level=Minecraft.getInstance().level; var pos=e.snapshot.source().pos();
+            if(level==null || !level.dimension().equals(e.snapshot.source().dimension())) return false;
+            var chunk=level.getChunkSource().getChunkNow(pos.getX()>>4,pos.getZ()>>4);
+            return chunk!=null && chunk.getBlockEntity(pos) instanceof net.minecraft.world.level.block.entity.JukeboxBlockEntity be
+                    && !be.isRemoved() && be.getBlockState().hasProperty(net.minecraft.world.level.block.JukeboxBlock.HAS_RECORD)
+                    && be.getBlockState().getValue(net.minecraft.world.level.block.JukeboxBlock.HAS_RECORD)
+                    && e.snapshot.index()>=0 && e.snapshot.index()<e.snapshot.sourcePlaylist().size()
+                    && e.snapshot.sourcePlaylist().get(e.snapshot.index()).equals(e.snapshot.location());
+        }
+        if(e.snapshot.sourceKind()!=OriginalSourceKind.ALBUM_ETCHED || a==null || !playable(a)) return false;
         var s=e.snapshot;
         if(s.slot()<0 || s.slot()>=a.getContainerSize() || s.index()<0) return false;
         var tracks=PlayableRecord.getTracks(Minecraft.getInstance().level.registryAccess(),a.getItem(s.slot()));
@@ -175,24 +217,29 @@ public final class LocalSourceSync {
         }
     }
     public static Binding created(GlobalPos source, SoundInstance token, AbstractOnlineSoundInstance owner) {
-        var a=album(source);
-        if(a==null) return null; // Vanilla activation and unrelated Etched players are untouched.
-        String location=((AbstractOnlineSoundInstance.OnlineSound)owner.getSound()).getURL();
-        String media=new TrackReference(gg.moonflower.etched.api.record.TrackData.isLocalSound(location)?TrackReference.Kind.SOUND_EVENT:TrackReference.Kind.URL,
-                location,Optional.empty(),a.getPlayingIndex(),a.getTrack()).mediaKey();
+        var a=album(source); var block=BLOCK_TRACKS.get(source);
+        OriginalSourceKind kind=a!=null?OriginalSourceKind.ALBUM_ETCHED:OriginalSourceKind.VANILLA_ETCHED;
         var e=SOURCES.get(source);
-        Identity id=owned(source)?e.identity():null;
+        if(a==null && (block==null || block.world()!=Minecraft.getInstance().level) && !(controlled && active(source)
+                && e.snapshot.sourceKind()==OriginalSourceKind.VANILLA_ETCHED)) return null;
+        String location=((AbstractOnlineSoundInstance.OnlineSound)owner.getSound()).getURL();
+        int slot=a!=null?a.getPlayingIndex():0;
+        int index=a!=null?a.getTrack():controlled?e.snapshot.index():block.index();
+        String media=new TrackReference(gg.moonflower.etched.api.record.TrackData.isLocalSound(location)?TrackReference.Kind.SOUND_EVENT:TrackReference.Kind.URL,
+                location,Optional.empty(),slot,index).mediaKey();
+        // Normal local initial start remains Etched's path. Only a controlled recovery or owned canonical source pre-rolls.
+        Identity id=active(source) && (controlled || owned(source))?e.identity():null;
         cancel(source);
-        var b=new Binding(source,Minecraft.getInstance().level,media,a.getPlayingIndex(),a.getTrack(),id);
+        var b=new Binding(source,Minecraft.getInstance().level,media,slot,index,id,kind);
         BINDINGS.put(token,b);
         if(id!=null) log("LOCAL_SOUND_CREATE",e,"ETCHED_ORIGINAL",0);
         return b;
     }
     /** Called with the Etched future resolved, on the client thread, before PcmTap/Channel ownership. */
     public static CompletableFuture<AudioStream> prepare(Binding b, SoundInstance token, AudioStream stream) {
-        if(b==null || !owned(b.source)) return CompletableFuture.completedFuture(stream);
+        if(b==null || !active(b.source) || b.creation==null && !owned(b.source)) return CompletableFuture.completedFuture(stream);
         var e=SOURCES.get(b.source); var id=e.identity();
-        if(!valid(e,album(b.source)) || !CanonicalAlignment.matches(id,b.source,b.media,b.slot,b.index)
+        if(b.kind!=id.kind() || !OriginalAudio.audible() || original(b.source)!=token || !valid(e,album(b.source)) || !CanonicalAlignment.matches(id,b.source,b.media,b.slot,b.index)
                 || b.creation!=null && !b.creation.equals(id)) {
             b.failed=true; silence(token); close(stream);
             log("LOCAL_RECONCILE_SKIPPED",e,"MEDIA_OR_GENERATION_MISMATCH",0);
@@ -219,7 +266,7 @@ public final class LocalSourceSync {
                 return reader;
             } finally { if(!transfer) close(reader); }
         },()->close(reader)).whenComplete((prepared,failure)->Minecraft.getInstance().execute(()->{
-            boolean current=guard.current(id) && SOURCES.get(b.source)==e && owned(b.source) && e.identity().equals(id)
+            boolean current=guard.current(id) && SOURCES.get(b.source)==e && active(b.source) && e.identity().equals(id)
                     && Minecraft.getInstance().level==b.world && original(b.source)==token && valid(e,album(b.source));
             if(failure!=null || !current) {
                 close(reader);
@@ -227,7 +274,8 @@ public final class LocalSourceSync {
                 b.failed=true; silence(token);
                 if(current && failure!=null) {
                     if(failure.getCause() instanceof PreparationEnd end) e.preparedEnd=new PreparedEnd(end.frame,end.rate);
-                    e.exhausted=true; log("LOCAL_PREROLL_CANCEL",e,
+                    if(failure.getCause() instanceof java.io.EOFException) { e.exhausted=true; e.recovery.terminal(); }
+                    log("LOCAL_PREROLL_CANCEL",e,
                         failure.getCause() instanceof java.io.EOFException?"TARGET_BEYOND_EOF":"PREPARATION_FAILED",0); }
                 else log("LOCAL_PREROLL_CANCEL",e,"STALE_PREPARATION",0);
                 result.complete(EmptyAudioStream.INSTANCE); return;
@@ -244,6 +292,7 @@ public final class LocalSourceSync {
     }
     /** Invoked immediately before the future is completed and Channel may begin reading. */
     public static void attached(Binding b, PcmTap tap) {
+        if(b!=null) { b.master=new java.lang.ref.WeakReference<>(tap.session()); b.masterId=tap.session().diagnostic().id; }
         if(b!=null && b.ready) {
             ALIGNED.put(tap.session().diagnostic().id,new Aligned(tap.session(),b.offset,b.creation,original(b.source)));
             var e=SOURCES.get(b.source); if(e!=null) log("LOCAL_SOUND_ALIGNED",e,"LOCAL_PCM_REMAINS_RELATIVE",0);
@@ -260,39 +309,81 @@ public final class LocalSourceSync {
         if(!owned(source)) return false;
         return true;
     }
+    public static void decoderEnded(MasterPlaybackSession.Observation observation) {
+        for(var b:BINDINGS.values()) if(b.masterId==observation.id()) b.decoderEof=true;
+    }
     public static boolean stopped(SoundInstance token) {
         var b=BINDINGS.get(token);
-        if(b==null || !owned(b.source)) return false;
+        if(b==null) return false;
+        var master=b.master==null?null:b.master.get();
+        boolean eof=b.decoderEof || master!=null && master.hasDecoderEof();
         var e=SOURCES.get(b.source);
-        if(original(b.source)==token && e.identity().equals(b.creation)) e.exhausted=true;
-        return true;
+        if(active(b.source) && original(b.source)==token && b.kind==e.snapshot.sourceKind()
+                && CanonicalAlignment.matches(e.identity(),b.source,b.media,b.slot,b.index)
+                && (b.creation==null || e.identity().equals(b.creation))) {
+            if(eof) { e.exhausted=true; e.recovery.terminal(); }
+            else log("ORIGINAL_CHANNEL_LOST",e,e.volumeLost?"VOLUME_ZERO":"NON_TERMINAL_CHANNEL_LOSS",0);
+        }
+        // A channel loss is not Etched's end-of-track signal, even before the first server snapshot.
+        return OriginalRecovery.suppressEnd(owned(b.source),eof);
     }
     /** HEAD of Etched playAlbum, only for a known active retained source. */
     public static boolean playAlbum(AlbumJukeboxBlockEntity a, CommonLevelAccessor level, BlockPos pos) {
         if(controlled || Minecraft.getInstance().level!=level) return false;
         var source=GlobalPos.of(Minecraft.getInstance().level.dimension(),pos); var e=SOURCES.get(source);
+        if(!OriginalAudio.audible() && playable(a) && (MUTED_STARTS.size()<32 || MUTED_STARTS.containsKey(source)))
+            MUTED_STARTS.put(source,OriginalSourceKind.ALBUM_ETCHED);
         if(!owned(source)) return false;
         if(!valid(e,a)) { cancel(source); return false; }
         var sound=original(source); var b=sound==null?null:BINDINGS.get(sound);
-        if(b!=null && e.identity().equals(b.creation) && !b.failed && Minecraft.getInstance().getSoundManager().isActive(sound)) return true;
+        if(b!=null && e.identity().equals(b.creation) && !b.failed && !e.volumeLost && OriginalAudio.healthy(sound)) return true;
         if(!e.exhausted) recreate(e,a,"ETCHED_CREATE");
         return true;
     }
     private static void recreate(Entry e, AlbumJukeboxBlockEntity a, String reason) {
-        if(!valid(e,a)) return;
+        if(!valid(e,a) || !near(e) || !OriginalAudio.audible()) return;
         long now=System.nanoTime();
-        if(e.identity().equals(e.attempted) && now-e.attemptedAt<10_000_000_000L) return;
+        e.recovery.volume(true);
+        if(!e.recovery.begin(now)) return;
         e.attempted=e.identity(); e.attemptedAt=now;
-        e.drift.requested(now); cancel(e.snapshot.source());
+        e.drift.requested(now); cancel(e.snapshot.source()); e.volumeLost=false;
         log("LOCAL_RECONCILE",e,reason,0);
         controlled=true;
         try {
-            a.setPlayingIndex(e.snapshot.slot(),e.snapshot.index());
-            a.setPlayingIndex(e.snapshot.slot(),e.snapshot.index());
-            SoundTracker.playAlbum(a,a.getBlockState(),Minecraft.getInstance().level,e.snapshot.source().pos(),true);
+            if(e.snapshot.sourceKind()==OriginalSourceKind.ALBUM_ETCHED) {
+                a.setPlayingIndex(e.snapshot.slot(),e.snapshot.index());
+                a.setPlayingIndex(e.snapshot.slot(),e.snapshot.index());
+                SoundTracker.playAlbum(a,a.getBlockState(),Minecraft.getInstance().level,e.snapshot.source().pos(),true);
+            } else {
+                stopOriginal(e.snapshot.source());
+                var tracks=e.snapshot.sourcePlaylist().stream().map(url->new gg.moonflower.etched.api.record.TrackData(url,"",
+                        net.minecraft.network.chat.Component.literal("Record"))).toArray(gg.moonflower.etched.api.record.TrackData[]::new);
+                SoundTracker.playBlockRecord(e.snapshot.source().pos(),tracks,e.snapshot.index());
+            }
         } finally { controlled=false; }
     }
     public static void tick(Minecraft client) {
+        if(OriginalAudio.audible()) {
+            var pending=new HashMap<>(MUTED_STARTS); MUTED_STARTS.clear();
+            for(var item:pending.entrySet()) {
+                var source=item.getKey(); var e=SOURCES.get(source);
+                if(e!=null && active(source) && e.snapshot.rate()>0 && e.snapshot.serverTick()>e.eventFence) continue;
+                if(client.player==null || !client.level.dimension().equals(source.dimension())
+                        || client.player.distanceToSqr(net.minecraft.world.phys.Vec3.atCenterOf(source.pos()))>64*64) continue;
+                var chunk=client.level.getChunkSource().getChunkNow(source.pos().getX()>>4,source.pos().getZ()>>4);
+                if(chunk==null || OriginalAudio.healthy(original(source))) continue;
+                if(item.getValue()==OriginalSourceKind.ALBUM_ETCHED) {
+                    var a=album(source);
+                    if(a!=null && playable(a)) SoundTracker.playAlbum(a,a.getBlockState(),client.level,source.pos(),true);
+                } else {
+                    var block=BLOCK_TRACKS.get(source);
+                    if(block!=null && block.world()==client.level && chunk.getBlockEntity(source.pos()) instanceof net.minecraft.world.level.block.entity.JukeboxBlockEntity be
+                            && be.getBlockState().getValue(net.minecraft.world.level.block.JukeboxBlock.HAS_RECORD))
+                        SoundTracker.playBlockRecord(source.pos(),block.tracks().toArray(gg.moonflower.etched.api.record.TrackData[]::new),block.index());
+                }
+            }
+        }
+        BLOCK_TRACKS.entrySet().removeIf(item->item.getValue().world()!=client.level || client.level.getChunkSource().getChunkNow(item.getKey().pos().getX()>>4,item.getKey().pos().getZ()>>4)==null);
         long now=System.nanoTime(); boolean sample=now-lastSample>=1_000_000_000L;
         if(sample) lastSample=now;
         var alignedIterator=ALIGNED.entrySet().iterator();
@@ -308,12 +399,13 @@ public final class LocalSourceSync {
         while(iterator.hasNext()) {
             var item=iterator.next(); var e=item.getValue(); var source=item.getKey();
             if(now-e.heard>10_000_000_000L) { cancel(source); log("LOCAL_CANONICAL_RELEASE",e,"SNAPSHOT_LEASE",0); iterator.remove(); continue; }
-            if(!owned(source)) continue;
+            if(!active(source)) continue;
             var a=album(source);
             if(!valid(e,a)) { cancel(source); continue; }
+            e.recovery.volume(OriginalAudio.audible());
             if(e.exhausted) {
                 var end=e.preparedEnd;
-                if(end!=null && now-end.lastSent>=1_000_000_000L) {
+                if(end!=null && owned(source) && now-end.lastSent>=1_000_000_000L) {
                     var s=e.snapshot;
                     PacketDistributor.sendToServer(new Report(source,s.media(),s.slot(),s.index(),end.id,end.frame,end.rate,
                             false,true,s.generation(),s.epoch(),end.announced?s.observerToken():0));
@@ -321,11 +413,19 @@ public final class LocalSourceSync {
                 }
                 continue;
             }
+            if(!OriginalAudio.audible() || !near(e)) continue;
             var sound=original(source); var b=sound==null?null:BINDINGS.get(sound);
-            if(sound==null || b==null || !e.identity().equals(b.creation)) {
+            // Observed local starts are kept, including their normal first decoder and natural sequencing.
+            if(!owned(source) && !e.volumeLost && OriginalAudio.healthy(sound) && (b==null || !b.failed
+                    && b.kind==e.snapshot.sourceKind() && CanonicalAlignment.matches(e.identity(),b.source,b.media,b.slot,b.index))) continue;
+            if(sound==null || b==null || !e.identity().equals(b.creation) || e.volumeLost) {
                 recreate(e,a,"LATE_SNAPSHOT_OR_NEW_GENERATION"); continue;
             }
-            if(b.failed || !b.ready || !sample) continue;
+            if(b.failed || !OriginalAudio.healthy(sound) && now-e.attemptedAt>2_000_000_000L) {
+                recreate(e,a,"ORIGINAL_CHANNEL_MISSING"); continue;
+            }
+            if(!b.ready || !sample) continue;
+            if(OriginalAudio.healthy(sound)) e.recovery.healthy();
             var master=MasterSessions.find(sound); var head=master==null?null:master.playhead();
             if(head!=null && e.drift.sample(head.frame()+b.offset-e.clock.target(),head.rate(),e.snapshot.paused(),now)) {
                 log("LOCAL_DRIFT_DETECTED",e,"SUSTAINED_OVER_1500_MS",head.frame()+b.offset-e.clock.target());
@@ -333,13 +433,23 @@ public final class LocalSourceSync {
             }
         }
     }
+    private static boolean near(Entry e) {
+        var c=Minecraft.getInstance();
+        return c.player!=null && c.player.distanceToSqr(net.minecraft.world.phys.Vec3.atCenterOf(e.snapshot.source().pos()))<=64*64;
+    }
+    public static void volumeChanged(boolean audible) {
+        for(var e:SOURCES.values()) {
+            e.recovery.volume(audible);
+            if(!audible) { e.volumeLost=true; cancel(e.snapshot.source()); }
+        }
+    }
     public static void reset(String reason) {
         for(var item:BINDINGS.entrySet()) { if(!item.getValue().ready) silence(item.getKey()); item.getValue().cancel(); }
-        SOURCES.clear(); BINDINGS.clear(); ALIGNED.clear(); controlled=false; lastSample=0;
+        SOURCES.clear(); BINDINGS.clear(); ALIGNED.clear(); BLOCK_TRACKS.clear(); MUTED_STARTS.clear(); controlled=false; lastSample=0;
     }
     private static void log(String event, Entry e, String reason, long delta) {
         var s=e.snapshot;
-        EtchedSpeakers.LOGGER.info("[ES-LOCAL-SYNC] {} source={} generation={} media={} target={} deltaMs={} reason={}",
-                event,s.source(),s.generation(),s.media(),e.clock==null?-1:e.clock.target(),s.rate()==0?0:delta*1000/s.rate(),reason);
+        EtchedSpeakers.LOGGER.info("[ES-LOCAL-SYNC] {} source={} generation={} media={} target={} deltaMs={} reason={} sourceKind={} remoteOwned={}",
+                event,s.source(),s.generation(),s.media(),e.clock==null?-1:e.clock.target(),s.rate()==0?0:delta*1000/s.rate(),reason,s.sourceKind(),s.remoteOwned());
     }
 }

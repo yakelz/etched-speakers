@@ -6,6 +6,8 @@
   "client": [
     "EtchedStreamMixin",
     "LocalAlbumSyncMixin",
+    "EtchedBlockRecoveryMixin",
+    "NativeOriginalLifecycleMixin",
     "EtchedStopListeningMixin",
     "ChannelMixin",
     "SoundManagerAccessor",

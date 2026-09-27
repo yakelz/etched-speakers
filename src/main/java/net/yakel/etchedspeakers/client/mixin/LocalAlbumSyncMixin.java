@@ -14,6 +14,11 @@ import org.spongepowered.asm.mixin.injection.callback.CallbackInfo;
 /** Client-only: retain Etched's own sound creation/positional audio, guard retained selection races. */
 @Mixin(value=SoundTracker.class,remap=false)
 public abstract class LocalAlbumSyncMixin {
+    @Inject(method="playBlockRecord(Lnet/minecraft/core/BlockPos;[Lgg/moonflower/etched/api/record/TrackData;ILjava/util/UUID;)V",at=@At("HEAD"),remap=false)
+    private static void etchedspeakers$block(BlockPos pos,gg.moonflower.etched.api.record.TrackData[] tracks,int index,
+            java.util.UUID storage,CallbackInfo ci) {
+        if(storage==null) LocalSourceSync.blockRecord(pos,tracks,index);
+    }
     @Inject(method="playAlbum",at=@At("HEAD"),cancellable=true,remap=false)
     private static void etchedspeakers$canonicalAlbum(AlbumJukeboxBlockEntity album, BlockState state,
             CommonLevelAccessor level, BlockPos pos, boolean force, CallbackInfo ci) {
