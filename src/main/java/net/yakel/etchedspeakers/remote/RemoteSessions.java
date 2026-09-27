@@ -29,7 +29,7 @@ public final class RemoteSessions {
         var state=AudioSourceResolver.readState(level,jukebox.getBlockPos());
         var e=SOURCES.get(source);
         var item=jukebox.getTheItem();
-        EtchedSpeakers.LOGGER.info("[ES-VANILLA-ACT] RECORD_CHANGE source={} generation={} listenerCount={} media={} reason=wasEmpty:{},empty:{},state:{},tracks:{},music:{},albumCover:{},active:{}",
+        EtchedSpeakers.LOGGER.debug("[ES-VANILLA-ACT] RECORD_CHANGE source={} generation={} listenerCount={} media={} reason=wasEmpty:{},empty:{},state:{},tracks:{},music:{},albumCover:{},active:{}",
                 source,e==null?0:e.timeline.generation(),RETENTION.listeners(source),
                 state.availableTracks().stream().limit(3).map(TrackReference::mediaKey).toList(),
                 wasEmpty,item.isEmpty(),state.reason(),state.availableTracks().size(),
@@ -236,9 +236,9 @@ public final class RemoteSessions {
         boolean localChanged=e.local.elect(e.remote.owner()==null?holders(server,source,null).stream().filter(id->RETENTION.holder(source,id)).collect(java.util.stream.Collectors.toSet()):Set.of(),now);
         if(remoteChanged || localChanged) {
             if(e.remote.owner()!=null) e.remoteOwned=true;
-            EtchedSpeakers.LOGGER.info("[ES-RETENTION] OBSERVER_ASSIGN source={} generation={} observer={} listeners={} frame={}",
+            EtchedSpeakers.LOGGER.debug("[ES-RETENTION] OBSERVER_ASSIGN source={} generation={} observer={} listeners={} frame={}",
                     source,e.timeline.generation(),e.remote.owner(),RETENTION.listeners(source),e.timeline.at(now));
-            EtchedSpeakers.LOGGER.info("[ES-RETENTION] AUTHORITY_HANDOFF source={} generation={} remoteObserver={} localObserver={} frame={}",
+            EtchedSpeakers.LOGGER.debug("[ES-RETENTION] AUTHORITY_HANDOFF source={} generation={} remoteObserver={} localObserver={} frame={}",
                     source,e.timeline.generation(),e.remote.owner(),e.local.owner(),e.timeline.at(now));
             broadcast(server,source,e);
         }
@@ -415,7 +415,7 @@ public final class RemoteSessions {
             e.remote.clear(); e.local.clear(); e.remoteOwned=false; e.finished=false;
             e.inventory=state.availableTracks(); e.track=track;
             e.timeline.bootstrap(track.mediaKey(),++sequence,now); e.reason="NATIVE_SERVER_TIMELINE"; e.changed=now;
-            EtchedSpeakers.LOGGER.info("[ES-NATIVE] SESSION_START source={} generation={} media={} elapsedTicks={}",
+            EtchedSpeakers.LOGGER.debug("[ES-NATIVE] SESSION_START source={} generation={} media={} elapsedTicks={}",
                     source,e.timeline.generation(),track.mediaKey(),elapsed);
             broadcast(level.getServer(),source,e);
         }
@@ -437,7 +437,7 @@ public final class RemoteSessions {
         if(state.reason()!=SourcePlaybackState.Reason.VANILLA_SONG_PLAYER || state.currentTrack().isEmpty()) return;
         var e=new Entry(); e.localOnly=true; SOURCES.put(source,e);
         updateNative(level,source,e,state,level.getGameTime());
-        EtchedSpeakers.LOGGER.info("[ES-LOCAL-ONLY] NATIVE_TIMELINE source={} generation={} localHolderCount={} remoteListenerCount=0 ticketHeld=false",
+        EtchedSpeakers.LOGGER.debug("[ES-LOCAL-ONLY] NATIVE_TIMELINE source={} generation={} localHolderCount={} remoteListenerCount=0 ticketHeld=false",
                 source,e.timeline.generation(),nearHolders(level.getServer(),source).size());
     }
     /** Real native setTheItem starts/stops playback even when the media stays identical.
@@ -470,6 +470,6 @@ public final class RemoteSessions {
         RETENTION.clear(); SOURCES.clear(); WATCHERS.clear(); BUDGETS.clear(); sequence=0;
     }
     private static void log(String event, GlobalPos source, Entry e, String reason) {
-        EtchedSpeakers.LOGGER.info("[ES-REMOTE] {} source={} generation={} media={} frame={} sampleRate={} reason={}",event,source,e.timeline.generation(),e.timeline.media(),e.timeline.at(e.timeline.lastReport()),e.timeline.rate(),reason);
+        EtchedSpeakers.LOGGER.debug("[ES-REMOTE] {} source={} generation={} media={} frame={} sampleRate={} reason={}",event,source,e.timeline.generation(),e.timeline.media(),e.timeline.at(e.timeline.lastReport()),e.timeline.rate(),reason);
     }
 }

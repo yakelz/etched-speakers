@@ -19,7 +19,7 @@ public final class RetentionTicketProbe {
         var level=event.getServer().overworld(); var chunks=level.getChunkSource(); var pos=new ChunkPos(POS);
         long now=level.getGameTime(); boolean loaded=chunks.getChunkNow(pos.x,pos.z)!=null;
         if(phase==0) {
-            if(loaded) { EtchedSpeakers.LOGGER.error("[ES-RETENTION-PROBE] FAIL initially loaded"); phase=3; return; }
+            if(loaded) { EtchedSpeakers.LOGGER.error("[ES-RETENTION-PROBE] FAIL initially loaded"); phase=3; event.getServer().halt(false); return; }
             started=now;
             chunks.addRegionTicket(SourceRetention.TICKET,pos,0,POS,false);
             phase=1; EtchedSpeakers.LOGGER.info("[ES-RETENTION-PROBE] INITIALLY_UNLOADED ticket acquired pos={}",pos);
@@ -32,6 +32,7 @@ public final class RetentionTicketProbe {
             chunks.removeRegionTicket(SourceRetention.TICKET,pos,0,POS,false);
             phase=3; EtchedSpeakers.LOGGER.error("[ES-RETENTION-PROBE] FAIL timeout");
         }
+        if(phase==3) event.getServer().halt(false);
     }
     @SubscribeEvent public static void stop(ServerStoppingEvent event) {
         if(phase==1) event.getServer().overworld().getChunkSource().removeRegionTicket(SourceRetention.TICKET,new ChunkPos(POS),0,POS,false);

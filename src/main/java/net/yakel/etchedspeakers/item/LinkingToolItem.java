@@ -72,7 +72,7 @@ public final class LinkingToolItem extends Item {
         var oldSource = speaker.getSourceDimension().map(dimension ->
                 net.minecraft.core.GlobalPos.of(dimension, speaker.getSourcePos().orElseThrow())).orElse(null);
         var requestedSource = selected == null ? null : net.minecraft.core.GlobalPos.of(selected.dimension(), selected.pos());
-        net.yakel.etchedspeakers.EtchedSpeakers.LOGGER.info(
+        net.yakel.etchedspeakers.EtchedSpeakers.LOGGER.debug(
                 "[ES-VANILLA-ACT] LINK_CLICK source={} speaker={} reason=previous:{},sameAddress:{}",
                 requestedSource, speaker.getBlockPos(), oldSource, java.util.Objects.equals(oldSource, requestedSource));
         if (selected == null) {

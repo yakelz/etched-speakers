@@ -188,7 +188,7 @@ public final class RemotePlayback {
             if(handle==null) { e.failed=true; close(source,e,"CHANNEL_NOT_ALLOCATED"); return; }
             if(e.snapshot.paused()) handle.execute(channel->channel.pause());
             log("REMOTE_MASTER_READY",source,e,"CURRENT_FRAME");
-            if(e.nativeClock!=null) EtchedSpeakers.LOGGER.info(
+            if(e.nativeClock!=null) EtchedSpeakers.LOGGER.debug(
                     "[ES-NATIVE] MASTER_READY source={} generation={} elapsedTicks={} targetFrame={} preparedFrame={} sampleRate={}",
                     source,session.generation(),e.nativeClock.elapsedTicks(),target(e,e.lastHead.rate()),e.lastHead.frame(),e.lastHead.rate());
         }));
@@ -211,7 +211,8 @@ public final class RemotePlayback {
         PlaybackObserver.clear(); epoch=UUID.randomUUID(); untilInterest=0; ticks=0; level=null;
     }
     private static void log(String event, GlobalPos source, Entry e, String reason) {
-        EtchedSpeakers.LOGGER.info("[ES-REMOTE] {} source={} generation={} media={} frame={} reason={}",event,source,
+        EtchedSpeakers.LOGGER.atLevel(reason.equals("PREPARE_FAILED") || reason.equals("CHANNEL_NOT_ALLOCATED")
+                ? org.slf4j.event.Level.WARN : org.slf4j.event.Level.DEBUG).log("[ES-REMOTE] {} source={} generation={} media={} frame={} reason={}",event,source,
                 e.snapshot.generation(),e.snapshot.media(),e.clock==null?-1:e.clock.target(),reason);
     }
 }

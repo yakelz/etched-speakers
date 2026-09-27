@@ -9,7 +9,7 @@ displayName="${mod_name}"
 authors="${mod_authors}"
 logoFile="info.png"
 description='''
-Adds synchronized, linkable speakers for Etched. Connect multiple speakers to vanilla Jukeboxes playing Etched records or to Etched Album Jukeboxes, with individual volume and range controls.
+Adds synchronized, linkable speakers for Etched. Connect multiple speakers to vanilla Jukeboxes playing Minecraft discs or Etched records, or to Etched Album Jukeboxes, with individual volume and range controls and remote playback.
 '''
 
 [[mixins]]

@@ -449,7 +449,8 @@ public final class LocalSourceSync {
     }
     private static void log(String event, Entry e, String reason, long delta) {
         var s=e.snapshot;
-        EtchedSpeakers.LOGGER.info("[ES-LOCAL-SYNC] {} source={} generation={} media={} target={} deltaMs={} reason={} sourceKind={} remoteOwned={}",
+        EtchedSpeakers.LOGGER.atLevel(reason.equals("PREPARATION_FAILED") ? org.slf4j.event.Level.WARN : org.slf4j.event.Level.DEBUG)
+                .log("[ES-LOCAL-SYNC] {} source={} generation={} media={} target={} deltaMs={} reason={} sourceKind={} remoteOwned={}",
                 event,s.source(),s.generation(),s.media(),e.clock==null?-1:e.clock.target(),s.rate()==0?0:delta*1000/s.rate(),reason,s.sourceKind(),s.remoteOwned());
     }
 }

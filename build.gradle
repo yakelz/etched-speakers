@@ -98,7 +98,6 @@ runs {
     }
 
     server {
-        if (project.hasProperty('retentionProbe')) systemProperty 'etchedspeakers.retentionProbe', 'true'
         systemProperty 'neoforge.enabledGameTestNamespaces', project.mod_id
         argument '--nogui'
     }

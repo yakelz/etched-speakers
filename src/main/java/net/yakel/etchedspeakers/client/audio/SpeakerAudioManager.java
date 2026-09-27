@@ -126,7 +126,7 @@ public final class SpeakerAudioManager {
                     + ",chosenMaster:" + (master == null ? "none" : master.diagnostic().id)
                     + "," + RemotePlayback.activationDiagnostic(source);
             if (!evidence.equals(activationDiagnostics.put(key, evidence))) {
-                net.yakel.etchedspeakers.EtchedSpeakers.LOGGER.info(
+                net.yakel.etchedspeakers.EtchedSpeakers.LOGGER.debug(
                         "[ES-VANILLA-ACT] CLIENT_ROUTE source={} speaker={} reason={}", source, key.pos(), evidence);
             }
         }

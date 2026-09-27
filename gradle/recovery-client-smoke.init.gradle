@@ -11,8 +11,12 @@ allprojects {
                 def fixtureDir = project.file('run/recovery-client-smoke')
                 fixtureDir.mkdirs()
                 workingDir fixtureDir
-                environment 'MOD_CLASSES', (sourceSets.main.output.files + sourceSets.clientTest.output.classesDirs.files)
+                def releaseJar = project.findProperty('releaseArtifact')
+                def production = releaseJar ? [project.file(releaseJar)] : sourceSets.main.output.files
+                if (releaseJar && !project.file(releaseJar).isFile()) throw new GradleException('Missing release artifact')
+                environment 'MOD_CLASSES', (production + sourceSets.clientTest.output.classesDirs.files)
                         .collect { 'etchedspeakers%%' + it.absolutePath }.join(File.pathSeparator)
+                if (releaseJar) systemProperty 'etchedspeakers.releaseValidation', 'true'
                 systemProperty 'etchedspeakers.originalClientValidation', 'true'
             }
             doLast {

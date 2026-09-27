@@ -101,7 +101,7 @@ final class SourceRetention {
                 // wakeup, an entirely empty dimension skips every BE after 300 ticks of grace.
                 level.resetEmptyTime();
                 if(now%200==0 && chunk!=null && chunk.getBlockEntity(source.pos()) instanceof net.minecraft.world.level.block.entity.JukeboxBlockEntity jukebox)
-                    EtchedSpeakers.LOGGER.info("[ES-NATIVE-TICKING] PROGRESS source={} generation={} elapsedTicks={} status={} entitiesLoaded={} remoteListeners={} holders={}",
+                    EtchedSpeakers.LOGGER.debug("[ES-NATIVE-TICKING] PROGRESS source={} generation={} elapsedTicks={} status={} entitiesLoaded={} remoteListeners={} holders={}",
                             source,generation.applyAsLong(source),jukebox.getSongPlayer().getTicksSinceSongStarted(),chunk.getFullStatus(),
                             level.areEntitiesLoaded(new ChunkPos(source.pos()).toLong()),listeners(source),holders(source));
             }
@@ -128,14 +128,15 @@ final class SourceRetention {
         if(old!=SourceTicketMode.NONE) chunks.removeRegionTicket(old==SourceTicketMode.TICKING_NATIVE?NATIVE_TICKET:TICKET,
                 pos,old==SourceTicketMode.TICKING_NATIVE?1:0,source.pos(),old==SourceTicketMode.TICKING_NATIVE);
         if(next==SourceTicketMode.NONE) tickets.remove(source); else tickets.put(source,next);
-        EtchedSpeakers.LOGGER.info("[ES-RETENTION] TICKET_MODE source={} chunk={} generation={} old={} new={} level={} forceTicks={} reason={}",
+        EtchedSpeakers.LOGGER.debug("[ES-RETENTION] TICKET_MODE source={} chunk={} generation={} old={} new={} level={} forceTicks={} reason={}",
                 source,pos,generation.applyAsLong(source),old,next,next==SourceTicketMode.NONE?-1:next==SourceTicketMode.TICKING_NATIVE?32:33,
                 next==SourceTicketMode.TICKING_NATIVE,reason);
     }
     void clear() { for(var s:keys()) release(s,false,"SERVER_STOP"); lifecycle.clear(); levels.clear(); tickets.clear(); lastCapWarning=-1200; }
     private record Status(int remote,int local,long grace) {}
     private void log(String event,GlobalPos source,String reason) {
-        EtchedSpeakers.LOGGER.info("[ES-RETENTION] {} source={} generation={} remoteListenerCount={} localHolderCount={} ticketHeld={} reason={}",
+        EtchedSpeakers.LOGGER.atLevel(reason.equals("INVALID_SOURCE") ? org.slf4j.event.Level.WARN : org.slf4j.event.Level.DEBUG)
+                .log("[ES-RETENTION] {} source={} generation={} remoteListenerCount={} localHolderCount={} ticketHeld={} reason={}",
                 event,source,generation.applyAsLong(source),listeners(source),holders(source),ticketHeld(source),reason);
     }
 }

@@ -111,7 +111,7 @@ public final class NativeOriginalRecovery {
                 e.preparing=false; e.replacement=null;
                 Throwable cause=failure; while(cause!=null && cause.getCause()!=null) cause=cause.getCause();
                 if(current && cause instanceof java.io.EOFException) e.gate.terminal();
-                log(e,"ORIGINAL_RECOVERY_CANCEL",current?"PREPARATION_FAILED_OR_EOF":"STALE_TOKEN",0);
+                log(e,"ORIGINAL_RECOVERY_CANCEL",!current?"STALE_TOKEN":cause instanceof java.io.EOFException?"TARGET_BEYOND_EOF":"PREPARATION_FAILED",0);
             }
             return;
         }
@@ -137,7 +137,8 @@ public final class NativeOriginalRecovery {
     }
     public static void reset() { for(var e:SOURCES.values()) cancel(e); SOURCES.clear(); }
     private static void log(Entry e,String event,String reason,long frame) {
-        EtchedSpeakers.LOGGER.info("[ES-ORIGINAL] {} source={} generation={} media={} frame={} reason={}",
+        EtchedSpeakers.LOGGER.atLevel(reason.equals("PREPARATION_FAILED") ? org.slf4j.event.Level.WARN : org.slf4j.event.Level.DEBUG)
+                .log("[ES-ORIGINAL] {} source={} generation={} media={} frame={} reason={}",
                 event,e.snapshot.source(),e.snapshot.generation(),e.snapshot.media(),frame,reason);
     }
 }

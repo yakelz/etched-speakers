@@ -16,7 +16,7 @@ import net.minecraft.client.resources.sounds.SoundInstance;
 import net.minecraft.core.GlobalPos;
 import net.minecraft.world.phys.Vec3;
 
-/** TEMPORARY diagnostic build: INFO transitions only. Never controls playback or loads chunks. */
+/** Support diagnostics: DEBUG by default, opt-in INFO with audioDiagnostics. Never controls playback or loads chunks. */
 public final class AudioDiagnostics {
     private static final AtomicLong IDS = new AtomicLong();
     private static final AtomicLong EVENTS = new AtomicLong();

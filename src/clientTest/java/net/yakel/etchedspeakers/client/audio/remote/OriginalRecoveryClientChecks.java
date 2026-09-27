@@ -22,6 +22,7 @@ public final class OriginalRecoveryClientChecks {
         try {
             Class.forName("gg.moonflower.etched.api.sound.SoundTracker");
             Class.forName("gg.moonflower.etched.common.network.play.handler.EtchedClientPlayPacketHandler");
+            if(Boolean.getBoolean("etchedspeakers.releaseValidation")) ReleaseClientChecks.run();
             var sound=new NativeOriginalSound(GlobalPos.of(Level.OVERWORLD,new BlockPos(10,64,10)),"minecraft:music_disc.creator");
             if(sound.getSource()!=SoundSource.RECORDS || sound.isRelative() || sound.getX()!=10.5)
                 throw new AssertionError("Original positional semantics");
