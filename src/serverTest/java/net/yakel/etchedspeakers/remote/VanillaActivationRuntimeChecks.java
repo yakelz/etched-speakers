@@ -268,11 +268,11 @@ public final class VanillaActivationRuntimeChecks {
             phase=10; nextTick=now+40;
         } else if(phase==10) {
             previousElapsed=jukebox.getSongPlayer().getTicksSinceSongStarted(); generation=latest().generation();
-            check(latest().active() && latest().paused(),"load-only retention freezes native snapshot instead of inventing a clock");
+            check(latest().active() && !latest().paused(),"production native ticket keeps snapshots ticking after natural support leaves");
             phase=11; nextTick=now+40;
         } else if(phase==11) {
-            check(jukebox.getSongPlayer().getTicksSinceSongStarted()==previousElapsed,"native BE really stops ticking with only load retention");
-            check(latest().nativeElapsedTicks()==previousElapsed && latest().generation()==generation,"paused snapshot preserves actual cursor and occurrence");
+            check(jukebox.getSongPlayer().getTicksSinceSongStarted()>=previousElapsed+40,"production native ticket advances the real BE without fixture support");
+            check(latest().nativeElapsedTicks()>previousElapsed && latest().generation()==generation,"remote snapshot preserves advancing cursor and occurrence");
             level.getChunkSource().addRegionTicket(FIXTURE,new ChunkPos(SOURCE),2,SOURCE,false);
             phase=12; nextTick=now+40;
         } else if(phase==12) {

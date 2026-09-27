@@ -21,6 +21,7 @@ public final class SourceStateChecks {
         NativeDiscChecks.run();
         OriginalRecoveryChecks.run();
         LocalOnlyRecoveryChecks.run();
+        NativeTickingChecks.run();
         SessionHandoffChecks.run();
         LocalCanonicalChecks.run();
         RetentionChecks.run();

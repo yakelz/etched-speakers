@@ -11,6 +11,10 @@ public final class ListenerRetention<K> {
         private long requested;
         private long grace = -1;
         private boolean ready;
+        private boolean nativeRemote;
+        /** Server-validated native remote occurrence; survives local handoff, cleared on stop. */
+        public boolean nativeRemote() { return nativeRemote; }
+        public void nativeRemote(boolean value) { nativeRemote = value; }
         Entry(long now) { requested = now; }
         public int listeners() { return listeners.size(); }
         public int holders() { return holders.size(); }

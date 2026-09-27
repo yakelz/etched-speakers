@@ -303,6 +303,7 @@ public final class RemoteSessions {
         bootstrap(server,source,e,state,RetainedTrackSelection.select(level,source.pos(),state,e.track),now,"SESSION_NEXT");
     }
     private static void stop(MinecraftServer server, GlobalPos source, Entry e, long now, String reason) {
+        RETENTION.stopNative(source);
         e.remote.clear(); e.local.clear();
         if(e.timeline.stop(now)) { stopped(source,e,now,reason); broadcast(server,source,e); }
     }
